@@ -1,0 +1,9 @@
+# generated data: synthetic images, run results, local SQLite database
+data/
+# never commit ID images
+*.jpg
+*.jpeg
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
