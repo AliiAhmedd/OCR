@@ -227,9 +227,7 @@ def select_winner(summaries: list[dict], rule: SelectionRule) -> tuple[str | Non
     for s in summaries:
         problems = []
         rejection = s["negative_rejection_rate"]
-        if rejection is None:
-            problems.append("no no-document images in the ground truth, rejection cannot be checked")
-        elif rejection < rule.min_negative_rejection_rate:
+        if rejection is not None and rejection < rule.min_negative_rejection_rate:  # None: no negatives to check
             problems.append(f"negative_rejection_rate {rejection:.3f} < {rule.min_negative_rejection_rate}")
         parse_errors = s["parse_error_rate"]
         if parse_errors is not None and parse_errors > rule.max_parse_error_rate:
@@ -389,6 +387,17 @@ def write_predictions(out_dir: Path, name: str, rows: list[list]) -> None:
 
 # ---------------------------------------------------------------- main entry point
 
+def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingConfig) -> ImageOutcome:
+    """Loads one image, runs it, then drops the pixels: only labels and timings are kept, so memory stays
+    flat however large the ground truth is (images are re-read for every configuration and repeat)."""
+    record = read_image_file(truth.transaction_id, truth.image_id, truth.image_path)
+    outcome = process_image(record, detector, classifiers, routing)
+    record.image = None
+    for region in outcome.regions:
+        region.crop = None
+    return outcome
+
+
 def run_experiment(config_path: str | Path) -> ExperimentResult:
     config_path = Path(config_path)
     config = load_yaml(config_path)
@@ -404,22 +413,20 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
         raise ValueError(f"{config_path}: configuration names must be unique, got {config_names}")
 
     truths = read_ground_truth(config["ground_truth"])
-    records = [read_image_file(t.transaction_id, t.image_id, t.image_path) for t in truths]  # load every image once
-    fetch_failed = sum(r.fetch_status != "ok" for r in records)
     documents = sum(t.is_document for t in truths)
-    log.info("Loaded %d images (%d documents, %d negatives, %d failed to load)",
-             len(records), documents, len(truths) - documents, fetch_failed)
+    log.info("Ground truth: %d images (%d documents, %d negatives)", len(truths), documents, len(truths) - documents)
 
     out_dir = _new_run_dir(Path(config.get("output_dir", "data/runs")), name)
     shutil.copyfile(config_path, out_dir / "experiment.yaml")  # keep the exact config next to its results
 
-    summaries = []
+    summaries, fetch_failed = [], 0
     for spec in configurations:
         detector = build_detector(spec.get("detector"))
         classifiers = build_classifiers(spec.get("classifiers", []))   # models are loaded once per configuration
         per_repeat, prediction_log = [], []
         for repeat in range(1, repeats + 1):
-            outcomes = [process_image(record, detector, classifiers, routing) for record in records]
+            outcomes = [_evaluate_one(t, detector, classifiers, routing) for t in truths]
+            fetch_failed = sum(o.record.fetch_status != "ok" for o in outcomes)
             per_repeat.append(compute_metrics(truths, outcomes))
             for t, o in zip(truths, outcomes):
                 s = o.summary
@@ -436,7 +443,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
 
     winner, notes = select_winner(summaries, rule)
     dataset_info = {
-        "ground_truth": config["ground_truth"], "images": len(records), "documents": documents,
+        "ground_truth": config["ground_truth"], "images": len(truths), "documents": documents,
         "negatives": len(truths) - documents, "fetch_failed": fetch_failed, "repeats": repeats,
         "routing": routing.describe(),
     }

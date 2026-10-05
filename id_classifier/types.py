@@ -24,7 +24,7 @@ STATUS_OK = "ok"                    # the classifier returned a valid answer
 STATUS_PARSE_ERROR = "parse_error"  # the model answered, but not in the expected JSON / label set
 STATUS_MODEL_ERROR = "model_error"  # the model could not be called at all (crash, timeout, not installed)
 
-# Columns of a ground-truth CSV (used by the synthetic generator and the evaluation harness).
+# Columns of a ground-truth CSV (written by ground_truth.py, read by the evaluation harness).
 GROUND_TRUTH_COLUMNS = ("transaction_id", "image_id", "image_path", "document_type", "issuing_country", "document_side")
 
 
@@ -57,7 +57,7 @@ class ImageRecord:
 
     transaction_id: int
     image_id: str                        # e.g. "front", "back", "page"
-    image_reference: str                 # file path or blob key; safe to log (no personal data)
+    image_reference: str                 # file or NFS zip path; safe to log (no personal data)
     image: Image.Image | None = None     # decoded image; None when the fetch failed
     image_hash: str | None = None        # sha256 of the original bytes, to spot duplicates
     fetch_status: str = "ok"             # "ok" | "failed"

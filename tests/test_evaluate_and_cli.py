@@ -3,33 +3,37 @@ from pathlib import Path
 
 import pytest
 
+from fakes import write_nfs_zip
 from id_classifier.__main__ import main
-from id_classifier.config import build_classifiers, build_detector, load_yaml
+from id_classifier.config import build_detector, load_yaml
 from id_classifier.evaluate import SelectionRule, read_ground_truth, run_experiment, select_winner
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-PERFECT = {"name": "perfect", "detector": {"type": "full_image"}, "classifiers": [{"type": "mock", "name": "p"}]}
-NOISY = {"name": "noisy", "classifiers": [{"type": "mock", "name": "n", "error_rate": 0.5, "parse_error_rate": 0.1, "seed": 4}]}
+PERFECT = {"name": "perfect", "detector": {"type": "full_image"}, "classifiers": [{"type": "fake", "name": "p"}]}
+WRONG = {"name": "wrong", "classifiers": [{"type": "fake", "name": "w", "wrong_country": "DZ"}]}
+BROKEN = {"name": "broken", "classifiers": [{"type": "fake", "name": "b", "parse_error": True}]}
 
 
-def test_perfect_mock_scores_perfectly(synthetic_csv, write_experiment):
-    result = run_experiment(write_experiment(synthetic_csv, [PERFECT, NOISY]))
+def test_perfect_classifier_scores_perfectly(ground_truth_csv, write_experiment):
+    result = run_experiment(write_experiment(ground_truth_csv, [PERFECT, WRONG, BROKEN]))
     perfect = next(s for s in result.summaries if s["config"] == "perfect")
     for metric in ("type_accuracy", "country_accuracy", "country_accuracy_macro", "side_accuracy",
                    "negative_rejection_rate", "coverage", "accepted_accuracy"):
         assert perfect[metric] == 1.0, metric
     assert perfect["parse_error_rate"] == 0.0
-    assert perfect["review_rate"] == pytest.approx(3 / 28)   # only the 3 negatives (a human confirms "none")
-    assert set(perfect["per_country"]) == {"TR", "TN", "SA", "JO", "SD"}
+    assert perfect["review_rate"] == pytest.approx(1 / 5)   # only the image without a document (a human confirms "none")
+    assert set(perfect["per_country"]) == {"TN", "MA"}
     assert result.winner == "perfect"
 
-    noisy = next(s for s in result.summaries if s["config"] == "noisy")
-    assert noisy["country_accuracy"] < 1.0 and noisy["parse_error_rate"] > 0.0
+    wrong = next(s for s in result.summaries if s["config"] == "wrong")
+    assert wrong["country_accuracy"] == 0.0 and wrong["type_accuracy"] == 1.0
+    broken = next(s for s in result.summaries if s["config"] == "broken")
+    assert broken["parse_error_rate"] == 1.0
 
 
-def test_output_files(synthetic_csv, write_experiment):
-    result = run_experiment(write_experiment(synthetic_csv, [PERFECT]))
+def test_output_files(ground_truth_csv, write_experiment):
+    result = run_experiment(write_experiment(ground_truth_csv, [PERFECT]))
     out = result.output_dir
     for name in ("comparison.md", "comparison.csv", "per_country.csv", "experiment.yaml",
                  "confusion_perfect.csv", "confusion_perfect.md", "predictions_perfect.csv"):
@@ -42,7 +46,7 @@ def test_output_files(synthetic_csv, write_experiment):
         for label, value in zip(labels, row[1:]):
             assert (int(value) > 0) == (label == row[0])
     with (out / "predictions_perfect.csv").open(encoding="utf-8") as f:
-        assert len(list(csv.DictReader(f))) == 28 * 2   # 28 images x 2 repeats
+        assert len(list(csv.DictReader(f))) == 5 * 2   # 5 images x 2 repeats
 
 
 def test_selection_rule():
@@ -57,6 +61,12 @@ def test_selection_rule():
     assert winner == "fast"
     assert "negative_rejection_rate" in notes["best_but_accepts_empty"]
     assert "parse_error_rate" in notes["broken_json"]
+
+
+def test_ground_truth_without_negatives_can_still_have_a_winner():
+    summaries = [{"config": "only", "negative_rejection_rate": None, "parse_error_rate": 0.0,
+                  "country_accuracy_macro": 0.8, "latency_mean_ms": 10.0}]
+    assert select_winner(summaries, SelectionRule())[0] == "only"
 
 
 def test_selection_rule_rejects_unknown_metric():
@@ -75,27 +85,32 @@ def test_bad_ground_truth_row_is_reported(tmp_path):
         read_ground_truth(path)
 
 
-def test_demo_config_builds():
-    """configs/demo.yaml must stay valid: every configuration builds with core dependencies only."""
-    config = load_yaml(REPO_ROOT / "configs" / "demo.yaml")
+def test_nfs_eval_config_is_valid():
+    """configs/nfs_eval.yaml must stay valid: the selection rule parses and every configuration's detector builds."""
+    config = load_yaml(REPO_ROOT / "configs" / "nfs_eval.yaml")
     SelectionRule.from_dict(config["selection_rule"])
-    for spec in config["configurations"]:
+    assert config["ground_truth"]
+    for spec in config.get("configurations") or []:
         build_detector(spec.get("detector"))
-        build_classifiers(spec["classifiers"])
 
 
 def test_cli_end_to_end(tmp_path, write_experiment):
-    """Definition of done: generate-synthetic, then evaluate and classify, through the CLI."""
-    data = tmp_path / "synthetic"
-    assert main(["generate-synthetic", "--out", str(data), "--per-country", "1", "--negatives", "3"]) == 0
+    """build-ground-truth from an NFS-shaped folder, then evaluate and classify, through the CLI."""
+    nfs = tmp_path / "nfs"
+    write_nfs_zip(nfs / "tun_nid_ocr", 1, "front", (255, 0, 0))
+    write_nfs_zip(nfs / "tun_nid_ocr", 1, "back", (0, 255, 0))
+    write_nfs_zip(nfs / "mar_nid_ocr", 2, "front", (0, 0, 255))
+    gt = tmp_path / "gt.csv"
+    assert main(["build-ground-truth", "--root", str(nfs), "--out", str(gt)]) == 0
     config = write_experiment(
-        data / "ground_truth.csv", [PERFECT, NOISY],
+        gt, [PERFECT, WRONG],
         classify={
-            "source": {"type": "local_folder", "path": str(data / "images")},
-            "classifiers": [{"type": "mock", "name": "p"}],
+            "source": {"type": "nfs_zip", "root": str(nfs), "folders": ["tun_nid_ocr", "mar_nid_ocr"]},
+            "classifiers": [{"type": "fake", "name": "p"}],
             "database_url": f"sqlite:///{(tmp_path / 'pipeline.db').as_posix()}",
         },
     )
     assert main(["evaluate", "--config", str(config)]) == 0
     assert main(["classify", "--config", str(config), "--run-id", "test-run"]) == 0
-    assert list((tmp_path / "runs").glob("test_*/comparison.md"))
+    [report] = (tmp_path / "runs").glob("test_*/comparison.md")
+    assert "## Winner: **perfect**" in report.read_text(encoding="utf-8")

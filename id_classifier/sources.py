@@ -4,8 +4,8 @@ Every source answers two questions:
 - list_keys(): which images exist? -> (transaction_id, image_id, reference) tuples
 - fetch(...):  give me one image    -> ImageRecord (a failed fetch is returned as a record, never raised)
 
-In Airflow the keys will come from our database (ocr_error_4201 + the image-path mapping), so the
-DAG only needs fetch(). list_keys() is for local folders and synthetic data.
+Images on the NFS share are stored one per zip (see NfsZipSource). read_image_file() opens both plain
+image files and those zips, so the evaluation harness can point a ground-truth CSV at either.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import hashlib
 import io
 import logging
 import re
+import zipfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -27,6 +28,12 @@ ImageKey = tuple[int, str, str]  # (transaction_id, image_id, reference)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 FILENAME_PATTERN = re.compile(r"^(?P<transaction_id>\d+)_(?P<image_id>[A-Za-z0-9-]+)$")  # file stem like "123456_front"
+
+# NFS zip names: <transaction_id>_<date>_<time>_<side>_<img|url>.zip, e.g. 1575232_2026-10-01_15-29-25-873057_front_img.zip
+NFS_ZIP_PATTERN = re.compile(
+    r"^(?P<transaction_id>\d+)_\d{4}-\d{2}-\d{2}_[\d.-]+_(?P<image_id>front|back)_(?:img|url)\.zip$"
+)
+ZIP_IMAGE_MEMBER = "original.jpeg"  # the uploaded image inside every NFS zip
 
 
 class ImageSource(ABC):
@@ -58,12 +65,20 @@ def record_from_bytes(transaction_id: int, image_id: str, reference: str, data: 
     return ImageRecord(transaction_id, image_id, reference, image=image, image_hash=image_hash)
 
 
+def read_zip_member(path: str | Path, member: str = ZIP_IMAGE_MEMBER) -> bytes:
+    """Reads one file out of a zip in memory (the image is never written to disk)."""
+    with zipfile.ZipFile(path) as archive:
+        return archive.read(member)
+
+
 def read_image_file(transaction_id: int, image_id: str, path: str | Path) -> ImageRecord:
-    """Reads one image file from disk."""
+    """Reads one image from disk: a plain image file, or an NFS zip holding original.jpeg."""
     try:
-        data = Path(path).read_bytes()
+        data = read_zip_member(path) if Path(path).suffix.lower() == ".zip" else Path(path).read_bytes()
     except OSError as exc:
         return failed_record(transaction_id, image_id, str(path), f"read_error: {type(exc).__name__}")
+    except (zipfile.BadZipFile, KeyError) as exc:  # not a zip, or no original.jpeg inside
+        return failed_record(transaction_id, image_id, str(path), f"zip_error: {type(exc).__name__}")
     return record_from_bytes(transaction_id, image_id, str(path), data)
 
 
@@ -94,23 +109,32 @@ class LocalFolderSource(ImageSource):
         return read_image_file(transaction_id, image_id, reference)
 
 
-class BlobSource(ImageSource):
-    """Images in the company blob storage. NOT IMPLEMENTED YET: provider and path mapping not confirmed.
+class NfsZipSource(ImageSource):
+    """Images on the NFS share: one folder per Core service (= services_service.name, e.g. "tun_nid_ocr"),
+    one zip per uploaded image, named <transaction_id>_<date>_<time>_<front|back>_<img|url>.zip.
 
-    TODO once access is granted:
-    1. Confirm the provider (S3 / Azure Blob / GCS / MinIO / other) and add its SDK as an optional extra.
-    2. Read credentials from an Airflow connection or environment variables, never from code or YAML.
-    3. fetch(): download the object at `reference` into memory (no temp files with ID images on disk)
-       and return record_from_bytes(...). Return failed_record(...) for "not found", "access denied", timeouts.
-    4. list_keys(): probably not needed in production; the keys come from the transaction -> image-path
-       mapping query in configs/pipeline.yaml (e.g. front_url / back_url in services_egyptiannationalid).
+    The image is read from the zip in memory. In production the keys will come from the database
+    (4201 transaction id + its service name); list_keys() covers listing whole folders.
     """
 
-    def __init__(self, **settings):
-        self.settings = settings  # e.g. bucket / container name, connection id; kept for the future implementation
+    def __init__(self, root: str | Path, folders: list[str]):
+        self.root = Path(root)
+        self.folders = list(folders)
 
     def list_keys(self) -> list[ImageKey]:
-        raise NotImplementedError("BlobSource.list_keys: image keys come from the database mapping, see the class docstring")
+        keys, skipped = [], 0
+        for folder in self.folders:
+            path = self.root / folder
+            if not path.is_dir():
+                raise FileNotFoundError(f"NFS folder not found: {path}")
+            for file in sorted(path.glob("*.zip")):
+                match = NFS_ZIP_PATTERN.match(file.name)
+                if not match:
+                    skipped += 1
+                    continue
+                keys.append((int(match["transaction_id"]), match["image_id"], str(file)))
+        log.info("NfsZipSource: %d images found in %d folders, %d skipped (unexpected name)", len(keys), len(self.folders), skipped)
+        return keys
 
     def fetch(self, transaction_id: int, image_id: str, reference: str) -> ImageRecord:
-        raise NotImplementedError("BlobSource.fetch: blob provider not confirmed yet, see the TODOs in the class docstring")
+        return read_image_file(transaction_id, image_id, reference)

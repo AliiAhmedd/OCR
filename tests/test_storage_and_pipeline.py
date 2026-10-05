@@ -1,11 +1,11 @@
 from sqlalchemy import select, update
 
-from id_classifier.classifiers.mock import MockClassifier
+from fakes import ColorClassifier
 from id_classifier.detectors import FullImageDetector
 from id_classifier.pipeline import run_classification
 from id_classifier.routing import RoutingConfig
+from id_classifier.sources import LocalFolderSource
 from id_classifier.storage import Storage, images, predictions, reviews
-from id_classifier.synthetic import SyntheticSource
 from id_classifier.types import ImageRecord
 
 
@@ -15,10 +15,9 @@ def make_storage(tmp_path) -> Storage:
     return storage
 
 
-def run(storage, run_id, source=None):
+def run(storage, run_id, folder):
     return run_classification(
-        source or SyntheticSource(per_country=1, negatives=2, seed=0, countries=["TR", "TN"]),
-        FullImageDetector(), [MockClassifier(error_rate=0.3, seed=1)], RoutingConfig(), storage, run_id,
+        LocalFolderSource(folder), FullImageDetector(), [ColorClassifier()], RoutingConfig(), storage, run_id,
     )
 
 
@@ -31,52 +30,51 @@ def test_image_row_is_upserted_not_duplicated(tmp_path):
     assert rows == [("ok", None)]
 
 
-def test_pipeline_stores_everything_and_reruns_are_safe(tmp_path):
+def test_pipeline_stores_everything_and_reruns_are_safe(tmp_path, images_dir):
     storage = make_storage(tmp_path)
-    counts = run(storage, "run-1")
-    # TR, TN: 1 card (front+back) + 1 passport each = 6 images, + 2 negatives = 8
-    assert counts["images"] == 8
-    assert sum(counts["per_status"].values()) == 8
-    assert storage.count_rows("images") == 8
-    assert storage.count_rows("regions") == 8
-    assert storage.count_rows("predictions") == 16       # 8 classifier rows + 8 router rows
-    assert storage.count_rows("reviews") == 8
+    counts = run(storage, "run-1", images_dir)
+    assert counts["images"] == 5                          # 4 documents + 1 without a document
+    assert counts["per_status"] == {"auto_accepted": 4, "needs_review": 1}
+    assert counts["per_country"] == {"TN": 2, "MA": 2, "NO_DOC": 1}
+    assert storage.count_rows("images") == 5
+    assert storage.count_rows("regions") == 5
+    assert storage.count_rows("predictions") == 10       # 5 classifier rows + 5 router rows
+    assert storage.count_rows("reviews") == 5
 
-    run(storage, "run-1")                                # same run again: nothing new
-    assert storage.count_rows("predictions") == 16
-    assert storage.count_rows("images") == 8
+    run(storage, "run-1", images_dir)                    # same run again: nothing new
+    assert storage.count_rows("predictions") == 10
+    assert storage.count_rows("images") == 5
 
-    run(storage, "run-2")                                # a new run appends history, never overwrites
-    assert storage.count_rows("predictions") == 32
-    assert storage.count_rows("reviews") == 8
+    run(storage, "run-2", images_dir)                    # a new run appends history, never overwrites
+    assert storage.count_rows("predictions") == 20
+    assert storage.count_rows("reviews") == 5
 
 
-def test_human_review_is_never_overwritten(tmp_path):
+def test_human_review_is_never_overwritten(tmp_path, images_dir):
     storage = make_storage(tmp_path)
-    run(storage, "run-1")
+    run(storage, "run-1", images_dir)
     with storage.engine.begin() as conn:
         conn.execute(update(reviews).values(review_status="corrected", issuing_country="JO", reviewer="tester"))
-    run(storage, "run-2")
+    run(storage, "run-2", images_dir)
     with storage.engine.connect() as conn:
         statuses = {row.review_status for row in conn.execute(select(reviews.c.review_status))}
     assert statuses == {"corrected"}
 
 
-def test_router_rows_explain_review(tmp_path):
+def test_router_rows_explain_review(tmp_path, images_dir):
     storage = make_storage(tmp_path)
-    run(storage, "run-1")
+    run(storage, "run-1", images_dir)
     with storage.engine.connect() as conn:
         router = conn.execute(
             select(predictions.c.needs_review, predictions.c.review_reasons).where(predictions.c.model_name == "router")
         ).all()
-    assert len(router) == 8
+    assert len(router) == 5
     assert all(reasons for needs_review, reasons in router if needs_review)   # every flagged row says why
 
 
-def test_failed_fetch_is_recorded_without_predictions(tmp_path):
+def test_failed_fetch_is_recorded_without_predictions(tmp_path, images_dir):
     storage = make_storage(tmp_path)
-    source = SyntheticSource(per_country=1, negatives=0, countries=["TR"])
-    counts = run_classification(source, FullImageDetector(), [MockClassifier()], RoutingConfig(), storage, "r",
-                                keys=[(1, "front", "missing")])
+    counts = run_classification(LocalFolderSource(images_dir), FullImageDetector(), [ColorClassifier()],
+                                RoutingConfig(), storage, "r", keys=[(1, "front", "missing")])
     assert counts["per_status"] == {"fetch_failed": 1}
     assert storage.count_rows("images") == 1 and storage.count_rows("predictions") == 0

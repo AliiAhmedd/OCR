@@ -1,11 +1,11 @@
 """Config: read YAML files and build components from them.
 
 A component is written in YAML as a small dict with a `type` and its settings, for example
-    classifier: {type: mock, name: mock_noisy, error_rate: 0.25}
+    classifier: {type: vlm, name: qwen_vl, model: "qwen2.5vl:7b"}
 `type` picks the class from the table below; every other key is passed to the class constructor.
 
-Classes are listed as "module:ClassName" strings and imported only when used, so choosing
-`type: mock` never imports torch, ultralytics or ollama.
+Classes are listed as "module:ClassName" strings and imported only when used, so a configuration
+only imports the heavy libraries (torch, ultralytics, ollama) of the components it actually uses.
 """
 
 from __future__ import annotations
@@ -19,15 +19,12 @@ import yaml
 REGISTRY = {
     "source": {
         "local_folder": "id_classifier.sources:LocalFolderSource",
-        "blob": "id_classifier.sources:BlobSource",
-        "synthetic": "id_classifier.synthetic:SyntheticSource",
+        "nfs_zip": "id_classifier.sources:NfsZipSource",
     },
     "detector": {
         "full_image": "id_classifier.detectors:FullImageDetector",
     },
-    "classifier": {
-        "mock": "id_classifier.classifiers.mock:MockClassifier",
-    },
+    "classifier": {},  # real classifiers (VLM, embeddings) are added here as they are implemented
 }
 
 DEFAULT_DETECTOR = {"type": "full_image"}

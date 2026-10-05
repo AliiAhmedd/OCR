@@ -9,7 +9,7 @@ description = "Sorts failed 4201 OCR transactions into reviewed, per-country ID 
 requires-python = ">=3.11"
 # Core: runs without a GPU and without any ML library
 dependencies = [
-    "pillow>=10.1",      # images (and the synthetic generator's scalable default font)
+    "pillow>=10.1",      # images
     "pyyaml>=6.0",       # configs
     "sqlalchemy>=2.0",   # storage on SQLite (local) or Postgres (Airflow)
 ]

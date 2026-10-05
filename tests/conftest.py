@@ -1,18 +1,48 @@
-"""Shared test fixtures: one small synthetic dataset for the whole test session."""
+"""Shared test fixtures: a few colour-coded images (see fakes.py) and the fake classifier registered as "fake"."""
 
 from pathlib import Path
 
 import pytest
 import yaml
 
-from id_classifier.synthetic import SyntheticSource, write_dataset
+from fakes import COLOR_OF, image_bytes
+from id_classifier.config import REGISTRY
+from id_classifier.types import GROUND_TRUTH_COLUMNS
+
+# file stem -> label: 4 documents (TN front+back, MA ID, MA licence) + 1 image without a document
+IMAGES = {
+    "101_front": ("national_id", "TN", "front"),
+    "101_back": ("national_id", "TN", "back"),
+    "102_front": ("national_id", "MA", "front"),
+    "103_front": ("driving_license", "MA", "front"),
+    "104_front": ("none", "unknown", "n/a"),
+}
 
 
-@pytest.fixture(scope="session")
-def synthetic_csv(tmp_path_factory) -> Path:
-    """2 ID cards (front+back) + 1 passport per country, 3 negatives -> 5*5 + 3 = 28 images."""
-    out = tmp_path_factory.mktemp("synthetic")
-    return write_dataset(SyntheticSource(per_country=2, negatives=3, seed=7), out)
+@pytest.fixture(autouse=True)
+def fake_classifier(monkeypatch):
+    """Makes `type: fake` available in YAML configs (the package itself ships no test classifier)."""
+    monkeypatch.setitem(REGISTRY["classifier"], "fake", "fakes:ColorClassifier")
+
+
+@pytest.fixture
+def images_dir(tmp_path) -> Path:
+    folder = tmp_path / "images"
+    folder.mkdir()
+    for stem, label in IMAGES.items():
+        (folder / f"{stem}.png").write_bytes(image_bytes(COLOR_OF[label]))
+    return folder
+
+
+@pytest.fixture
+def ground_truth_csv(images_dir) -> Path:
+    lines = [",".join(GROUND_TRUTH_COLUMNS)]
+    for stem, (document_type, country, side) in IMAGES.items():
+        transaction_id, image_id = stem.split("_")
+        lines.append(f"{transaction_id},{image_id},images/{stem}.png,{document_type},{country},{side}")
+    path = images_dir.parent / "ground_truth.csv"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 @pytest.fixture

@@ -18,7 +18,7 @@ class Classifier(ABC):
     - measure latency_ms around the model call
     """
 
-    name: str            # unique name inside one experiment, e.g. "qwen_vl_7b" or "mock_noisy"
+    name: str            # unique name inside one experiment, e.g. "qwen_vl_7b"
     model_version: str   # what exactly ran (weights tag, settings), stored with every prediction
 
     @abstractmethod

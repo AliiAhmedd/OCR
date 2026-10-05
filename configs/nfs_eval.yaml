@@ -1,0 +1,28 @@
+# Evaluation on the labeled NFS folders (real ID images, labels from folder + file name)."
+#   python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 50
+#   python -m id_classifier evaluate --config configs/nfs_eval.yaml
+# Paths are relative to the folder you run the command from (the repo root).
+
+experiment_name: nfs_eval
+ground_truth: data/ground_truth.csv
+output_dir: data/runs
+repeats: 1                     # raise to 3 once a model's latency or sampling varies between runs
+
+routing:
+  confidence_threshold: 0.8    # below this a result goes to review
+
+# Fixed BEFORE looking at the results (agreed rule). The NFS folders hold no "no document" images,
+# so negative_rejection_rate is not measured (and not required) until such images are added.
+selection_rule: # selection rules for the "best" configuration 
+  min_negative_rejection_rate: 0.95
+  max_parse_error_rate: 0.02
+  primary_metric: country_accuracy_macro   # highest wins
+  tie_breaker: latency_mean_ms             # lowest wins on a tie
+
+# Each configuration = one detector + one or more classifiers (more than one = ensemble).
+# No classifier is implemented yet; the first one (VLM via a local Ollama server) goes here, e.g.
+#   - name: full_image+qwen_vl
+#     detector: {type: full_image}
+#     classifiers:
+#       - {type: vlm, name: qwen_vl, model: "qwen2.5vl:7b"}
+configurations: []

@@ -1,6 +1,6 @@
 """Command line: python -m id_classifier <command> ...
 
-    generate-synthetic   write fake ID images + ground_truth.csv (no real personal data)
+    build-ground-truth   write ground_truth.csv from the labeled NFS folders (tun_nid_ocr, mar_nid_ocr, ...)
     evaluate             run every configuration of an experiment YAML and write the comparison table
     classify             run the pipeline on a source and store the results in the database
 """
@@ -10,22 +10,18 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections import Counter
 
 from id_classifier.config import build_classifiers, build_detector, build_source, load_yaml
 from id_classifier.evaluate import run_experiment
+from id_classifier.ground_truth import build_ground_truth
 from id_classifier.pipeline import new_run_id, run_classification
 from id_classifier.routing import RoutingConfig
 from id_classifier.storage import Storage
-from id_classifier.synthetic import SyntheticSource, write_dataset
 
 
-def cmd_generate_synthetic(args: argparse.Namespace) -> int:
-    source = SyntheticSource(per_country=args.per_country, negatives=args.negatives, seed=args.seed)
-    csv_path = write_dataset(source, args.out)
-    per_type = Counter(s.document_type for s in source.samples)
-    print(f"Wrote {len(source.samples)} images and {csv_path}")
-    print(f"Per document type: {dict(per_type)}")
+def cmd_build_ground_truth(args: argparse.Namespace) -> int:
+    csv_path = build_ground_truth(args.root, args.out, per_folder=args.per_folder, seed=args.seed)
+    print(f"Wrote {csv_path}")
     return 0
 
 
@@ -59,19 +55,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m id_classifier", description="Classify non-Egyptian ID images.")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    p = commands.add_parser("generate-synthetic", help="write fake ID images and a ground-truth CSV")
-    p.add_argument("--out", default="data/synthetic", help="output folder (default: data/synthetic)")
-    p.add_argument("--per-country", type=int, default=4, help="ID cards per country, front+back (default: 4)")
-    p.add_argument("--negatives", type=int, default=8, help="images without a document (default: 8)")
-    p.add_argument("--seed", type=int, default=42, help="same seed = same images (default: 42)")
-    p.set_defaults(func=cmd_generate_synthetic)
+    p = commands.add_parser("build-ground-truth", help="write ground_truth.csv from the labeled NFS folders")
+    p.add_argument("--root", default="/mnt/nfs", help="NFS root as this machine sees it (default: /mnt/nfs)")
+    p.add_argument("--out", default="data/ground_truth.csv", help="output CSV (default: data/ground_truth.csv)")
+    p.add_argument("--per-folder", type=int, help="at most this many images per folder (default: all)")
+    p.add_argument("--seed", type=int, default=42, help="same seed = same sample (default: 42)")
+    p.set_defaults(func=cmd_build_ground_truth)
 
     p = commands.add_parser("evaluate", help="compare the configurations of an experiment YAML")
-    p.add_argument("--config", required=True, help="experiment YAML, e.g. configs/demo.yaml")
+    p.add_argument("--config", required=True, help="experiment YAML, e.g. configs/nfs_eval.yaml")
     p.set_defaults(func=cmd_evaluate)
 
     p = commands.add_parser("classify", help="run the pipeline and store results in the database")
-    p.add_argument("--config", required=True, help="YAML with a 'classify' section, e.g. configs/demo.yaml")
+    p.add_argument("--config", required=True, help="YAML with a 'classify' section")
     p.add_argument("--run-id", help="reuse a run id to rerun safely (default: cli-<timestamp>)")
     p.set_defaults(func=cmd_classify)
     return parser

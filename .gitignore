@@ -1,4 +1,4 @@
-# generated data: synthetic images, run results, local SQLite database
+# generated data: ground truth CSV, run results, local SQLite database
 data/
 # never commit ID images
 *.jpg

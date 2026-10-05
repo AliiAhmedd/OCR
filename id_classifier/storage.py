@@ -50,7 +50,7 @@ images = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("transaction_id", BigInteger, nullable=False),      # Core's transaction id (ocr_error_4201.transaction_id)
     Column("image_id", String(64), nullable=False),            # e.g. "front", "back"
-    Column("image_reference", Text, nullable=False),           # path / blob key, never the image itself
+    Column("image_reference", Text, nullable=False),           # file or NFS zip path, never the image itself
     Column("image_hash", String(64)),                          # sha256 of the bytes (NULL when the fetch failed)
     Column("fetch_status", String(16), nullable=False),        # "ok" | "failed"
     Column("failure_reason", Text),
