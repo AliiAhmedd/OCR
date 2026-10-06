@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import random
 import re
 import zipfile
 from abc import ABC, abstractmethod
@@ -138,3 +139,55 @@ class NfsZipSource(ImageSource):
 
     def fetch(self, transaction_id: int, image_id: str, reference: str) -> ImageRecord:
         return read_image_file(transaction_id, image_id, reference)
+
+
+PERCEPTUAL_HASH_SIZE = 16          # 16 x 16 = 256 bits per image
+NEAR_DUPLICATE_DISTANCE = 10       # at most this many of the 256 bits differ = the same picture re-saved
+
+
+def perceptual_hash(image: Image.Image, size: int = PERCEPTUAL_HASH_SIZE) -> int:
+    """Difference hash (dHash): a fingerprint of how the image LOOKS, not of its bytes. The image is shrunk
+    to (size+1) x size grey pixels; each bit says "is this pixel brighter than its right neighbour?".
+    A re-saved or re-compressed copy gives (almost) the same bits; a different picture differs in about
+    half of them. Returned as one int of size*size bits."""
+    small = image.convert("L").resize((size + 1, size), Image.Resampling.LANCZOS)
+    pixels = small.tobytes()                          # one byte per grey pixel, row by row
+    bits = 0
+    for y in range(size):
+        row = pixels[y * (size + 1):(y + 1) * (size + 1)]
+        for x in range(size):
+            bits = (bits << 1) | (row[x] > row[x + 1])
+    return bits
+
+
+def hash_distance(a: int, b: int) -> int:
+    """How many bits differ between two perceptual hashes (0 = look identical, ~128 = unrelated)."""
+    return (a ^ b).bit_count()
+
+
+def sample_nfs_records(root: str | Path, folder: str, per_folder: int, seed: int = 42, unique_only: bool = True,
+                       max_distance: int = NEAR_DUPLICATE_DISTANCE):
+    """Yields up to `per_folder` readable images of one NFS folder in a random order (same seed = same images).
+    With unique_only, an image is skipped when it is a copy of one already yielded: the same bytes (sha256),
+    or the same picture re-saved (perceptual distance <= max_distance). Many NFS folders hold the same
+    upload dozens of times. Used by the detector sweep and preview, so both see the same images."""
+    source = NfsZipSource(root, [folder])
+    keys = source.list_keys()
+    random.Random(seed).shuffle(keys)
+    seen_bytes, seen_looks, taken = set(), [], 0
+    for transaction_id, image_id, reference in keys:
+        if taken == per_folder:
+            return
+        record = source.fetch(transaction_id, image_id, reference)
+        if record.image is None:
+            continue
+        if unique_only:
+            if record.image_hash in seen_bytes:
+                continue
+            looks = perceptual_hash(record.image)
+            if any(hash_distance(looks, seen) <= max_distance for seen in seen_looks):
+                continue
+            seen_bytes.add(record.image_hash)
+            seen_looks.append(looks)
+        taken += 1
+        yield record

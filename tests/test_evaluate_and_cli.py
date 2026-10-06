@@ -2,8 +2,9 @@ import csv
 from pathlib import Path
 
 import pytest
+import yaml
 
-from fakes import write_nfs_zip
+from fakes import write_nfs_zip, write_picture_zip
 from id_classifier.__main__ import main
 from id_classifier.config import build_detector, load_yaml
 from id_classifier.evaluate import SelectionRule, read_ground_truth, run_experiment, select_winner
@@ -114,3 +115,37 @@ def test_cli_end_to_end(tmp_path, write_experiment):
     assert main(["classify", "--config", str(config), "--run-id", "test-run"]) == 0
     [report] = (tmp_path / "runs").glob("test_*/comparison.md")
     assert "## Winner: **perfect**" in report.read_text(encoding="utf-8")
+
+
+def test_preview_detector_writes_boxes_crops_and_summary(tmp_path):
+    """preview-detector reads only the listed folders and saves one boxes image + crops per sampled image."""
+    nfs = tmp_path / "nfs"
+    write_picture_zip(nfs / "tun_nid_ocr", 1, "front", 1)
+    write_picture_zip(nfs / "tun_nid_ocr", 2, "front", 1)
+    write_picture_zip(nfs / "tun_nid_ocr", 3, "back", 2)
+    write_picture_zip(nfs / "billing_reports", 9, "front", 3)        # not on the list: never read
+    out = tmp_path / "preview"
+    config = tmp_path / "preview.yaml"
+    config.write_text(yaml.safe_dump({"preview": {
+        "root": str(nfs), "folders": ["tun_nid_ocr"], "per_folder": 2, "output_dir": str(out),
+        "detector": {"type": "full_image"},
+    }}), encoding="utf-8")
+
+    assert main(["preview-detector", "--config", str(config)]) == 0
+    with (out / "summary.csv").open(encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2                                          # per_folder sample
+    assert len({row["image_hash"] for row in rows}) == 2           # 1 and 2 are the same image: only one shown
+    assert {row["folder"] for row in rows} == {"tun_nid_ocr"}
+    assert all(row["regions"] == "1" and row["bboxes"] == "0,0,64,48" for row in rows)
+    for row in rows:
+        stem = f"{row['transaction_id']}_{row['image_id']}"
+        assert (out / "tun_nid_ocr" / f"{stem}_boxes.jpg").exists()
+        assert (out / "tun_nid_ocr" / f"{stem}_crop0.jpg").exists()
+    assert not (out / "billing_reports").exists()
+
+
+def test_yolo_preview_config_is_valid():
+    preview = load_yaml(REPO_ROOT / "configs" / "yolo_preview.yaml")["preview"]
+    assert preview["detector"]["type"] == "yolo"
+    assert "billing_reports" not in preview["folders"]

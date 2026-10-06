@@ -23,6 +23,7 @@ REGISTRY = {
     },
     "detector": {
         "full_image": "id_classifier.detectors:FullImageDetector",
+        "yolo": "id_classifier.detectors:YoloDetector",          # needs the [yolo] extra (ultralytics)
     },
     "classifier": {},  # real classifiers (VLM, embeddings) are added here as they are implemented
 }

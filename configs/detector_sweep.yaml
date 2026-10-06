@@ -1,0 +1,27 @@
+# Detector sweep (step 2): which prompts and thresholds make YOLOE find the documents?
+#   python -m id_classifier sweep-detector --config configs/detector_sweep.yaml
+# Writes numbers only (no images) to output_dir/sweep_<timestamp>/sweep.md.
+
+sweep:
+  root: /mnt/nfs
+  # Only these folders are ever read.
+  folders: [tun_nid_ocr, mar_nid_ocr, dza_nid_ocr, mar_driver_license_ocr, UAE_RESIDENT_ID_OCR]
+  per_folder: 20                 # DISTINCT images per folder (fewer when a folder has fewer)
+  unique_only: true              # skip byte-identical re-uploads, so one card is not counted 27 times
+  seed: 42
+  output_dir: data/sweeps
+  thresholds: [0.05, 0.10, 0.15, 0.25]   # each detector runs once at the lowest; the rest are counted
+
+  # Shared detector settings. name, prompts and confidence are filled in per prompt set.
+  detector:
+    type: yolo
+    weights: yoloe-26s-seg.pt
+    duplicate_iou: 0.7
+    image_size: 640
+
+  # prompt set name -> the text classes YOLOE looks for
+  prompt_sets:
+    current: ["identity card", "passport", "driving licence"]   # what step 1 used
+    identity_card: ["identity card"]
+    id_card: ["id card", "card"]
+    document: ["document", "plastic card"]
