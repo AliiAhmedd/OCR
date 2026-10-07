@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from id_classifier.types import ImageRecord, Region, make_region_id
 
 Box = tuple[int, int, int, int]  # (x0, y0, x1, y1) in pixels, x1/y1 exclusive (same as PIL's crop)
+FULL_IMAGE_INDEX = "full"        # region id suffix of YoloDetector's whole-image fallback region
 
 
 class Detector(ABC):
@@ -63,6 +64,11 @@ class YoloDetector(Detector):
     Every box becomes one Region, most confident first (index 0). Boxes are rounded outward to whole
     pixels, clipped to the image, and near-duplicates are merged (YOLOE can mark the same card as both
     "identity card" and "driving licence", which must not count as two documents).
+
+    Fallback: when YOLO finds no box, the whole image becomes one region (id "...:full", confidence 0.0).
+    In close-ups the card fills the photo and YOLO has nothing to separate it from, so without this the
+    image would skip the classifier and go to review as "no document". A blank image still ends up in
+    review: the classifier then says "none".
     """
 
     def __init__(
@@ -74,6 +80,7 @@ class YoloDetector(Detector):
         image_size: int = 640,        # YOLO resizes the image to this (longest side) before detection
         device: str = "cpu",
         name: str = "yolo",
+        fallback_full_image: bool = True,  # no box found -> the whole image is one region
         model=None,                   # an already-loaded model; tests pass a fake here
     ):
         self.name = name
@@ -83,6 +90,7 @@ class YoloDetector(Detector):
         self.duplicate_iou = duplicate_iou
         self.image_size = image_size
         self.device = device
+        self.fallback_full_image = fallback_full_image
         self.model = model if model is not None else self._load_model()
 
     def _load_model(self):
@@ -112,6 +120,16 @@ class YoloDetector(Detector):
                 candidates.append((box, float(confidence)))
         kept = drop_duplicates(candidates, self.duplicate_iou)
 
+        if not kept and self.fallback_full_image:
+            return [Region(
+                region_id=make_region_id(record.transaction_id, record.image_id, self.name, FULL_IMAGE_INDEX),
+                transaction_id=record.transaction_id,
+                image_id=record.image_id,
+                bbox=(0, 0, width, height),
+                confidence=0.0,                  # 0.0 = not a detection, only the fallback
+                detector_name=self.name,
+                crop=record.image,
+            )]
         return [
             Region(
                 region_id=make_region_id(record.transaction_id, record.image_id, self.name, index),

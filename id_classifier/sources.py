@@ -142,7 +142,7 @@ class NfsZipSource(ImageSource):
 
 
 PERCEPTUAL_HASH_SIZE = 16          # 16 x 16 = 256 bits per image
-NEAR_DUPLICATE_DISTANCE = 10       # at most this many of the 256 bits differ = the same picture re-saved
+NEAR_DUPLICATE_DISTANCE = 40       # at most this many of the 256 bits differ = the same card (re-saved or re-shot); user-checked
 
 
 def perceptual_hash(image: Image.Image, size: int = PERCEPTUAL_HASH_SIZE) -> int:

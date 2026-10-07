@@ -18,6 +18,7 @@ The selection rule is written in the YAML BEFORE running, so the winner is not p
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import re
 import shutil
@@ -381,7 +382,8 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
 
 def write_predictions(out_dir: Path, name: str, rows: list[list]) -> None:
     headers = ["repeat", "transaction_id", "image_id", "true_type", "true_country", "true_side",
-               "pred_type", "pred_country", "pred_side", "confidence", "needs_review", "reasons", "latency_ms"]
+               "pred_type", "pred_country", "pred_side", "confidence", "needs_review", "reasons", "latency_ms",
+               "classifier_outputs"]   # raw answer per classifier for the chosen region (labels/scores only)
     _write_csv(out_dir / f"predictions_{_slug(name)}.csv", headers, rows)
 
 
@@ -434,6 +436,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
                     repeat, t.transaction_id, t.image_id, t.document_type, t.issuing_country, t.document_side,
                     s.document_type, s.issuing_country, s.document_side, s.confidence, s.needs_review,
                     ",".join(s.reasons), round(o.latency_ms, 2),
+                    json.dumps({p.model_name: p.raw_output for p in o.predictions.get(s.region_id, [])}),
                 ])
             log.info("Configuration %s: repeat %d/%d done", spec["name"], repeat, repeats)
         summary = aggregate(spec["name"], per_repeat)

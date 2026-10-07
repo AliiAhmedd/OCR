@@ -1,0 +1,23 @@
+# Train the YOLO26 classification models for configuration B (step 7).
+#   python -m id_classifier train-cls --config configs/train_cls.yaml
+# Crops every ground-truth image with the detector below (the same one the pipeline uses), then trains one
+# model per fold (each without its fold, for honest evaluation) plus one on everything ("full").
+
+train_cls:
+  ground_truth: data/ground_truth.csv
+  dataset_dir: data/cls_dataset        # crops = REAL ID images (gitignored); delete when done
+  output_dir: models/yolo26_cls        # weights (*.pt, gitignored) + manifest.json
+  folds: 5
+  base_weights: yolo26n-cls.pt         # smallest YOLO26 classifier, downloaded on first use
+  epochs: 15
+  image_size: 224
+
+  detector:                            # must match the configuration's detector
+    type: yolo
+    name: yoloe26s
+    weights: yoloe-26s-seg.pt
+    prompts: ["id card", "card"]
+    confidence: 0.15
+    duplicate_iou: 0.7
+    image_size: 640
+    fallback_full_image: true

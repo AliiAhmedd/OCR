@@ -64,13 +64,30 @@ def test_yolo_two_separate_documents_are_both_kept():
     assert len(regions) == 2                                    # routing will flag multiple_documents
 
 
-def test_yolo_nothing_found_and_box_outside_image():
+def test_yolo_nothing_found_and_box_outside_image_without_fallback():
     record = ImageRecord(7, "front", "ref", image=position_image(100, 80))
-    assert yolo([], []).detect(record) == []
-    assert yolo([(150, 10, 200, 50)], [0.9]).detect(record) == []   # entirely outside: dropped
+    assert yolo([], [], fallback_full_image=False).detect(record) == []
+    assert yolo([(150, 10, 200, 50)], [0.9], fallback_full_image=False).detect(record) == []   # outside: dropped
 
 
-def test_yolo_failed_fetch_does_not_call_the_model():
+def test_yolo_fallback_whole_image_when_nothing_found():
+    record = ImageRecord(7, "front", "ref", image=position_image(100, 80))
+    [region] = yolo([], []).detect(record)                          # fallback is on by default
+    assert region.bbox == (0, 0, 100, 80)
+    assert region.crop.size == (100, 80)
+    assert region.region_id == "7:front:yolo:full"                  # never mistaken for a real box
+    assert region.confidence == 0.0
+    [outside] = yolo([(150, 10, 200, 50)], [0.9]).detect(record)    # only a box outside the image
+    assert outside.region_id == "7:front:yolo:full"
+
+
+def test_yolo_fallback_not_used_when_a_box_is_found():
+    record = ImageRecord(7, "front", "ref", image=position_image(100, 80))
+    [region] = yolo([(10, 20, 60, 50)], [0.9]).detect(record)
+    assert region.region_id == "7:front:yolo:0"
+
+
+def test_yolo_failed_fetch_does_not_call_the_model():   # and gets no fallback region either
     detector = yolo([(0, 0, 10, 10)], [0.9])
     assert detector.detect(ImageRecord(7, "front", "ref", fetch_status="failed")) == []
     assert detector.model.calls == []

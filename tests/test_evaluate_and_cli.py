@@ -6,7 +6,7 @@ import yaml
 
 from fakes import write_nfs_zip, write_picture_zip
 from id_classifier.__main__ import main
-from id_classifier.config import build_detector, load_yaml
+from id_classifier.config import REGISTRY, load_yaml
 from id_classifier.evaluate import SelectionRule, read_ground_truth, run_experiment, select_winner
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -87,12 +87,16 @@ def test_bad_ground_truth_row_is_reported(tmp_path):
 
 
 def test_nfs_eval_config_is_valid():
-    """configs/nfs_eval.yaml must stay valid: the selection rule parses and every configuration's detector builds."""
+    """configs/nfs_eval.yaml must stay valid: the selection rule parses and every detector / classifier type is
+    registered (the real models are not loaded here: that needs torch and takes minutes)."""
     config = load_yaml(REPO_ROOT / "configs" / "nfs_eval.yaml")
     SelectionRule.from_dict(config["selection_rule"])
     assert config["ground_truth"]
-    for spec in config.get("configurations") or []:
-        build_detector(spec.get("detector"))
+    names = [spec["name"] for spec in config["configurations"]]
+    assert len(set(names)) == len(names)
+    for spec in config["configurations"]:
+        assert (spec.get("detector") or {"type": "full_image"})["type"] in REGISTRY["detector"]
+        assert all(c["type"] in REGISTRY["classifier"] for c in spec["classifiers"])
 
 
 def test_cli_end_to_end(tmp_path, write_experiment):

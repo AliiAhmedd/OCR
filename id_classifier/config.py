@@ -25,7 +25,10 @@ REGISTRY = {
         "full_image": "id_classifier.detectors:FullImageDetector",
         "yolo": "id_classifier.detectors:YoloDetector",          # needs the [yolo] extra (ultralytics)
     },
-    "classifier": {},  # real classifiers (VLM, embeddings) are added here as they are implemented
+    "classifier": {
+        "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [embeddings] extra
+        "yolo_cls": "id_classifier.classifiers.yolo_cls:YoloClsClassifier",   # needs the [yolo] extra + train-cls
+    },
 }
 
 DEFAULT_DETECTOR = {"type": "full_image"}

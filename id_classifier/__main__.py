@@ -6,6 +6,7 @@
     preview-detector     run a detector on a few NFS images and save the boxes + crops for a visual check
     sweep-detector       compare detector settings (prompts x thresholds): detection counts per folder, no images
     find-duplicates      find NFS images uploaded more than once (same bytes), within and across folders
+    train-cls            train the YOLO26 classification models (k folds + full) on the ground-truth crops
 
 Every command, its options and its output files are described in CLIhelp.md.
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from id_classifier.config import build, build_classifiers, build_detector, build_source, load_yaml
 from id_classifier.duplicates import find_duplicates
@@ -29,7 +31,8 @@ from id_classifier.sweep import sweep_detectors
 
 
 def cmd_build_ground_truth(args: argparse.Namespace) -> int:
-    csv_path = build_ground_truth(args.root, args.out, per_folder=args.per_folder, seed=args.seed)
+    csv_path = build_ground_truth(args.root, args.out, per_folder=args.per_folder, seed=args.seed,
+                                  negatives=args.negatives)
     print(f"Wrote {csv_path}")
     return 0
 
@@ -111,6 +114,31 @@ def cmd_find_duplicates(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_train_cls(args: argparse.Namespace) -> int:
+    from id_classifier.classifiers.yolo_cls import build_cls_dataset, class_name, train_cls_models
+    from id_classifier.evaluate import read_ground_truth
+    from id_classifier.sources import read_image_file
+
+    section = load_yaml(args.config).get("train_cls")
+    if section is None:
+        raise SystemExit(f"{args.config} has no 'train_cls' section")
+    detector = build_detector(section.get("detector"))
+    crops = []
+    for truth in read_ground_truth(section["ground_truth"]):
+        regions = detector.detect(read_image_file(truth.transaction_id, truth.image_id, truth.image_path))
+        if regions:   # the most confident box, exactly as the pipeline will crop it
+            crops.append((regions[0].crop, class_name(truth.document_type, truth.issuing_country, truth.document_side)))
+    folds = section.get("folds", 5)
+    manifest = build_cls_dataset(crops, Path(section.get("dataset_dir", "data/cls_dataset")), folds)
+    out = train_cls_models(Path(section.get("dataset_dir", "data/cls_dataset")),
+                           Path(section.get("output_dir", "models/yolo26_cls")), manifest,
+                           base_weights=section.get("base_weights", "yolo26n-cls.pt"),
+                           epochs=section.get("epochs", 15), image_size=section.get("image_size", 224))
+    print(f"Trained {folds} fold models + full on {len(crops)} crops: {out}")
+    print("Reminder: the crops in the dataset folder are real ID images. Delete it when no longer needed.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m id_classifier", description="Classify non-Egyptian ID images.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -118,8 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = commands.add_parser("build-ground-truth", help="write ground_truth.csv from the labeled NFS folders")
     p.add_argument("--root", default="/mnt/nfs", help="NFS root as this machine sees it (default: /mnt/nfs)")
     p.add_argument("--out", default="data/ground_truth.csv", help="output CSV (default: data/ground_truth.csv)")
-    p.add_argument("--per-folder", type=int, help="at most this many images per folder (default: all)")
+    p.add_argument("--per-folder", type=int, help="at most this many DISTINCT pictures per folder (default: all)")
     p.add_argument("--seed", type=int, default=42, help="same seed = same sample (default: 42)")
+    p.add_argument("--negatives", type=int, default=0,
+                   help="also generate this many no-document images (blank, noise, gradient) (default: 0)")
     p.set_defaults(func=cmd_build_ground_truth)
 
     p = commands.add_parser("evaluate", help="compare the configurations of an experiment YAML")
@@ -157,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--review-images", action="store_true",
                    help="write each close pair side by side to <out>/review (real ID images)")
     p.set_defaults(func=cmd_find_duplicates)
+
+    p = commands.add_parser("train-cls", help="train YOLO26 classification models (k folds + full) on ground-truth crops")
+    p.add_argument("--config", required=True, help="YAML with a 'train_cls' section, e.g. configs/train_cls.yaml")
+    p.set_defaults(func=cmd_train_cls)
     return parser
 
 

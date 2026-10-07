@@ -1,7 +1,7 @@
 import csv
 import zipfile
 
-from fakes import write_nfs_zip
+from fakes import write_nfs_zip, write_picture_zip
 from id_classifier.ground_truth import build_ground_truth
 from id_classifier.sources import LocalFolderSource, NfsZipSource, read_image_file
 
@@ -51,8 +51,9 @@ def test_zip_without_original_jpeg_is_a_failed_record(tmp_path):
 def test_build_ground_truth_labels_from_folder_and_name(tmp_path):
     root = tmp_path / "nfs"
     for txn in (1, 2, 3):
-        write_nfs_zip(root / "tun_nid_ocr", txn, "front", (255, 0, 0))
-    write_nfs_zip(root / "mar_driver_license_ocr", 9, "back", (255, 255, 0))
+        write_picture_zip(root / "tun_nid_ocr", txn, "front", txn)                 # 3 different pictures
+    write_picture_zip(root / "tun_nid_ocr", 4, "front", 1, quality=60)           # picture 1 re-saved: skipped
+    write_picture_zip(root / "mar_driver_license_ocr", 9, "back", 9)
     csv_path = build_ground_truth(root, tmp_path / "gt.csv", per_folder=2)   # absent folders are skipped
     with csv_path.open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -61,3 +62,27 @@ def test_build_ground_truth_labels_from_folder_and_name(tmp_path):
     assert len(tun) == 2 and all(r["document_type"] == "national_id" and r["document_side"] == "front" for r in tun)
     [mar] = [r for r in rows if r["issuing_country"] == "MA"]
     assert (mar["document_type"], mar["document_side"]) == ("driving_license", "back")
+
+
+def test_build_ground_truth_keeps_only_distinct_pictures(tmp_path):
+    root = tmp_path / "nfs"
+    write_picture_zip(root / "dza_nid_ocr", 1, "front", 1)
+    write_picture_zip(root / "dza_nid_ocr", 2, "front", 1)                       # exact copy
+    write_picture_zip(root / "dza_nid_ocr", 3, "front", 1, quality=60)           # re-saved copy
+    write_picture_zip(root / "dza_nid_ocr", 4, "back", 2)
+    csv_path = build_ground_truth(root, tmp_path / "gt.csv")
+    with csv_path.open(encoding="utf-8") as f:
+        assert len(list(csv.DictReader(f))) == 2
+
+
+def test_build_ground_truth_adds_negatives(tmp_path):
+    root = tmp_path / "nfs"
+    write_picture_zip(root / "tun_nid_ocr", 1, "front", 1)
+    csv_path = build_ground_truth(root, tmp_path / "gt.csv", negatives=5)
+    with csv_path.open(encoding="utf-8") as f:
+        negatives = [r for r in csv.DictReader(f) if r["document_type"] == "none"]
+    assert len(negatives) == 5
+    assert all((r["issuing_country"], r["document_side"]) == ("unknown", "n/a") for r in negatives)
+    assert all(int(r["transaction_id"]) >= 900_000_000 for r in negatives)       # never a real transaction id
+    record = read_image_file(int(negatives[3]["transaction_id"]), "page", negatives[3]["image_path"])
+    assert record.fetch_status == "ok" and record.image.size == (640, 400)

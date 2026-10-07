@@ -19,10 +19,54 @@ selection_rule: # selection rules for the "best" configuration
   primary_metric: country_accuracy_macro   # highest wins
   tie_breaker: latency_mean_ms             # lowest wins on a tie
 
+# Shared detector: YOLOE-26 with the best prompts of the sweep (progress.md rows 5-6) + whole-image fallback.
+yoloe: &yoloe
+  type: yolo
+  name: yoloe26s
+  weights: yoloe-26s-seg.pt
+  prompts: ["id card", "card"]
+  confidence: 0.15
+  duplicate_iou: 0.7
+  image_size: 640
+  fallback_full_image: true
+
 # Each configuration = one detector + one or more classifiers (more than one = ensemble).
-# No classifier is implemented yet; the first one (VLM via a local Ollama server) goes here, e.g.
-#   - name: full_image+qwen_vl
-#     detector: {type: full_image}
-#     classifiers:
-#       - {type: vlm, name: qwen_vl, model: "qwen2.5vl:7b"}
-configurations: []
+configurations:
+  # A: DINOv2 embedding + k nearest labeled references. References = this ground truth, cropped by the
+  #    same detector; each image skips its own picture (leave-one-out), so the score is honest.
+  - name: A_yoloe+dinov2_knn
+    detector: *yoloe
+    classifiers:
+      - type: knn
+        name: dinov2_knn
+        model: facebook/dinov2-small
+        references: data/ground_truth.csv
+        reference_detector: *yoloe
+        k: 5
+        min_similarity: 0.72       # below this: "unknown". Calibrated on run nfs_eval_20261006-130940 (progress.md row 12)
+
+  # B: YOLO26 classification model trained on our crops (train-cls). Each image is classified by the fold
+  #    model that never saw it (5-fold cross-validation), so the score is honest.
+  - name: B_yoloe+yolo26_cls
+    detector: *yoloe
+    classifiers:
+      - type: yolo_cls
+        name: yolo26_cls
+        models_dir: models/yolo26_cls
+        min_probability: 0.5       # below this: "unknown"
+
+  # D: ensemble of A and B. The router votes; any disagreement goes to review.
+  - name: D_yoloe+knn+yolo26_cls
+    detector: *yoloe
+    classifiers:
+      - type: knn
+        name: dinov2_knn
+        model: facebook/dinov2-small
+        references: data/ground_truth.csv
+        reference_detector: *yoloe
+        k: 5
+        min_similarity: 0.72
+      - type: yolo_cls
+        name: yolo26_cls
+        models_dir: models/yolo26_cls
+        min_probability: 0.5

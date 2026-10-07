@@ -31,6 +31,7 @@ cd /mnt/c/Users/LENOVO/Downloads/Valify_Project1_OCR
 | `preview-detector` | Draws a detector's boxes on a few images for a visual check | YAML with a `preview` section | `data/detect_preview/` (**real ID images**) |
 | `sweep-detector` | Compares detector prompts x thresholds: detection counts per folder | YAML with a `sweep` section | `data/sweeps/sweep_<time>/` (numbers only) |
 | `find-duplicates` | Finds exact and near (re-saved) copies, within and across folders | NFS zips | `data/duplicates/` (numbers; real images only with `--review-images`) |
+| `train-cls` | Trains the YOLO26 classification models for configuration B (5 folds + full) | YAML with a `train_cls` section + ground truth | `models/yolo26_cls/`, crops in `data/cls_dataset/` (**real ID images**) |
 
 ## Tests
 
@@ -46,20 +47,24 @@ own code (crops, routing, storage, reports), not the real models.
 
 Writes the answer key for `evaluate`. Every labeled NFS folder holds one document type of one country
 (e.g. `tun_nid_ocr` = Tunisian national ID), and the file name gives the side (front/back).
+Only **distinct pictures** are kept: exact copies and the same card re-saved or re-shot (perceptual
+distance <= 40) appear once. Optional generated **negatives** (blank, noise, gradient images, label
+`none`) check that images without a document go to review.
 
 ```bash
-python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 50
+python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 150 --negatives 20
 ```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--root` | `/mnt/nfs` | NFS root as this machine sees it |
-| `--out` | `data/ground_truth.csv` | output CSV |
-| `--per-folder` | all | random sample of at most N images per folder |
+| `--out` | `data/ground_truth.csv` | output CSV (negatives go to `negatives/` next to it) |
+| `--per-folder` | all | at most N distinct pictures per folder (random, same seed = same pictures) |
 | `--seed` | 42 | same seed = same sample |
+| `--negatives` | 0 | also generate N no-document images |
 
-The labeled folders are listed in `FOLDER_LABELS` in `id_classifier/ground_truth.py`.
-Caveat: duplicates are not removed yet, so run `find-duplicates` first (dza_nid_ocr is mostly one card).
+The labeled folders are listed in `FOLDER_LABELS` in `id_classifier/ground_truth.py`. `epassport` is not
+one of them: its zips hold only the chip's face photo (`dg2_face.jp2`), not an image of the passport.
 
 ## evaluate
 
@@ -161,7 +166,7 @@ python -m id_classifier find-duplicates --max-distance 6 --review-distance 30
 | `--root` | `/mnt/nfs` | NFS root |
 | `--folders` | the labeled ID folders | folders to check |
 | `--out` | `data/duplicates` | output folder |
-| `--max-distance` | 10 | distance (of 256 bits) at or below which two images count as copies |
+| `--max-distance` | 40 | distance (of 256 bits) at or below which two images count as copies (chosen by eye: above 40 it is about 50/50 same card or not) |
 | `--review-distance` | 40 | every pair up to this distance is listed, to check the threshold |
 | `--review-images` | off | also draw every close pair side by side in `<out>/review/` (**real ID images**) |
 
@@ -177,6 +182,27 @@ Writes to `--out`:
 The same distance is used by `sweep-detector` and `preview-detector` (`unique_only: true`) to skip copies
 when sampling. Slow on the full share: it reads and decodes every zip over NFS (about 15 minutes).
 
+## train-cls
+
+Trains configuration B's classifier: a small YOLO26 classification model that learns the label triple
+(e.g. `national_id__TN__front`) from our own crops. Every ground-truth image is cropped by the detector in
+the YAML, then 5-fold cross-validation trains 5 models, each without one fifth of the crops. At
+`evaluate`, each image is classified by the model that never saw it (found by a hash of the crop's
+pixels), so the score is honest. A 6th model ("full", trained on everything) is used for new images.
+
+```bash
+python -m id_classifier train-cls --config configs/train_cls.yaml
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--config` | YAML with a `train_cls` section (required), e.g. `configs/train_cls.yaml` |
+
+YAML settings: `ground_truth`, `detector` (must match the configuration's detector), `folds` (5),
+`base_weights` (`yolo26n-cls.pt`), `epochs` (15), `image_size` (224), `dataset_dir`, `output_dir`.
+Writes the crops to `data/cls_dataset/` (**real ID images**, delete when done) and the models plus
+`manifest.json` to `models/yolo26_cls/` (gitignored). CPU only: expect 10-20 minutes.
+
 ## Config files
 
 | File | Used by |
@@ -184,3 +210,4 @@ when sampling. Slow on the full share: it reads and decodes every zip over NFS (
 | `configs/nfs_eval.yaml` | `evaluate` |
 | `configs/yolo_preview.yaml` | `preview-detector` |
 | `configs/detector_sweep.yaml` | `sweep-detector` |
+| `configs/train_cls.yaml` | `train-cls` |

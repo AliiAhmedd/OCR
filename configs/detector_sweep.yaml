@@ -18,6 +18,7 @@ sweep:
     weights: yoloe-26s-seg.pt
     duplicate_iou: 0.7
     image_size: 640
+    fallback_full_image: true    # no box -> whole image as one region (id ...:full, confidence 0.0)
 
   # prompt set name -> the text classes YOLOE looks for
   prompt_sets:

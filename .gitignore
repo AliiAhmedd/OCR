@@ -10,3 +10,4 @@ __pycache__/
 # downloaded / trained model weights
 *.pt
 mobileclip*.ts
+models/
