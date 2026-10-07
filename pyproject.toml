@@ -7,22 +7,15 @@ name = "id_classifier"
 version = "0.1.0"
 description = "Sorts failed 4201 OCR transactions into reviewed, per-country ID document datasets"
 requires-python = ">=3.11"
-# Core: runs without a GPU and without any ML library
 dependencies = [
     "pillow>=10.1",      # images
     "pyyaml>=6.0",       # configs
-    "sqlalchemy>=2.0",   # storage on SQLite (local) or Postgres (Airflow)
 ]
 
 [project.optional-dependencies]
-yolo = ["ultralytics>=8.3"]                                  # YoloDetector (step 2)
-vlm = ["ollama>=0.4"]                                        # VlmClassifier via a local Ollama server (step 2)
-embeddings = ["torch>=2.2", "transformers>=4.49", "numpy"]   # EmbeddingKnnClassifier (step 2)
-postgres = ["psycopg[binary]>=3.1"]                          # Postgres driver outside Airflow
-dev = ["pytest>=8", "matplotlib>=3.8"]                       # tests + confusion-matrix PNGs
+# Everything configuration A needs: YOLOE-26 detector (ultralytics), DINOv2 kNN classifier (torch,
+# transformers, numpy) and the confusion-matrix PNG (matplotlib). Install torch CPU-only first (README).
+models = ["ultralytics>=8.3", "torch>=2.2", "transformers>=4.49", "numpy", "matplotlib>=3.8"]
 
 [tool.setuptools.packages.find]
 include = ["id_classifier*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

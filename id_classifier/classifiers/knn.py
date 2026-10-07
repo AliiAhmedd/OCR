@@ -44,7 +44,7 @@ class EmbeddingKnnClassifier(Classifier):
         references: str,                          # ground-truth CSV whose images are the labeled references
         name: str = "dinov2_knn",
         model: str = "facebook/dinov2-small",
-        reference_detector: dict | None = None,   # detector spec used to crop the references (default: whole image)
+        reference_detector: dict | None = None,   # detector spec used to crop the references (required)
         k: int = 5,
         min_similarity: float = 0.5,              # below this the crop is "unknown"
         exclude_self_above: float = 0.995,        # leave-one-out: skip the query's own picture

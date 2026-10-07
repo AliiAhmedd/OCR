@@ -335,12 +335,16 @@ COMPARISON_COLUMNS = [
 
 def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str | None, notes: dict,
                   rule: SelectionRule, dataset_info: dict) -> None:
-    headers = ["config", *COMPARISON_COLUMNS, "latency_ms (mean ± std)", "repeats", "selection"]
+    # No no-document images in the ground truth -> that metric cannot be measured: leave it out of the report.
+    # (It is still computed, and checked by the selection rule, as soon as such images are added.)
+    columns = [m for m in COMPARISON_COLUMNS
+               if m != "negative_rejection_rate" or dataset_info["negatives"] > 0]
+    headers = ["config", *columns, "latency_ms (mean ± std)", "repeats", "selection"]
     rows = []
     for s in summaries:
         latency = "n/a" if s["latency_mean_ms"] is None else f"{s['latency_mean_ms']:.2f} ± {s['latency_std_ms']:.2f}"
         selection = "WINNER" if s["config"] == winner else notes[s["config"]]
-        rows.append([s["config"], *[s[m] for m in COMPARISON_COLUMNS], latency, s["repeats"], selection])
+        rows.append([s["config"], *[s[m] for m in columns], latency, s["repeats"], selection])
     _write_csv(out_dir / "comparison.csv", headers, rows)
 
     country_headers = ["config", "country", "n", "type_accuracy", "country_accuracy", "side_accuracy"]
@@ -354,8 +358,9 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         f"# Experiment: {name}",
         "",
         f"- Ground truth: `{dataset_info['ground_truth']}`",
-        f"- Images: {dataset_info['images']} ({dataset_info['documents']} documents, "
-        f"{dataset_info['negatives']} without a document, {dataset_info['fetch_failed']} could not be loaded)",
+        f"- Images: {dataset_info['images']} ({dataset_info['documents']} documents"
+        + (f", {dataset_info['negatives']} without a document" if dataset_info["negatives"] else "")
+        + f", {dataset_info['fetch_failed']} could not be loaded)",
         f"- Repeats per configuration: {dataset_info['repeats']}",
         f"- Routing: {dataset_info['routing']}",
         f"- Selection rule (fixed before the run): {rule.describe()}",
@@ -372,7 +377,7 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         "",
         "## Metric definitions",
         "",
-        *[f"- **{k}**: {v}" for k, v in METRIC_HELP.items()],
+        *[f"- **{k}**: {v}" for k, v in METRIC_HELP.items() if k in columns or k not in COMPARISON_COLUMNS],
         "",
         "Confusion matrices: `confusion_<config>.md` / `.csv` (and `.png` when matplotlib is installed).",
         "",

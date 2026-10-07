@@ -27,8 +27,6 @@ log = logging.getLogger(__name__)
 
 ImageKey = tuple[int, str, str]  # (transaction_id, image_id, reference)
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-FILENAME_PATTERN = re.compile(r"^(?P<transaction_id>\d+)_(?P<image_id>[A-Za-z0-9-]+)$")  # file stem like "123456_front"
 
 # NFS zip names: <transaction_id>_<date>_<time>_<side>_<img|url>.zip, e.g. 1575232_2026-10-01_15-29-25-873057_front_img.zip
 NFS_ZIP_PATTERN = re.compile(
@@ -81,33 +79,6 @@ def read_image_file(transaction_id: int, image_id: str, path: str | Path) -> Ima
     except (zipfile.BadZipFile, KeyError) as exc:  # not a zip, or no original.jpeg inside
         return failed_record(transaction_id, image_id, str(path), f"zip_error: {type(exc).__name__}")
     return record_from_bytes(transaction_id, image_id, str(path), data)
-
-
-class LocalFolderSource(ImageSource):
-    """Images in a folder, named <transaction_id>_<image_id>.<ext>, e.g. 123456_front.jpg."""
-
-    def __init__(self, path: str | Path, recursive: bool = False):
-        self.path = Path(path)
-        self.recursive = recursive
-
-    def list_keys(self) -> list[ImageKey]:
-        if not self.path.is_dir():
-            raise FileNotFoundError(f"Image folder not found: {self.path}")
-        files = self.path.rglob("*") if self.recursive else self.path.glob("*")
-        keys, skipped = [], 0
-        for file in sorted(files):
-            if file.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue                                    # not an image (e.g. a CSV next to the images)
-            match = FILENAME_PATTERN.match(file.stem)
-            if not match:
-                skipped += 1                                # an image, but the name does not tell us its key
-                continue
-            keys.append((int(match["transaction_id"]), match["image_id"], str(file)))
-        log.info("LocalFolderSource: %d images found, %d skipped (name is not <transaction_id>_<image_id>)", len(keys), skipped)
-        return keys
-
-    def fetch(self, transaction_id: int, image_id: str, reference: str) -> ImageRecord:
-        return read_image_file(transaction_id, image_id, reference)
 
 
 class NfsZipSource(ImageSource):
@@ -170,7 +141,7 @@ def sample_nfs_records(root: str | Path, folder: str, per_folder: int, seed: int
     """Yields up to `per_folder` readable images of one NFS folder in a random order (same seed = same images).
     With unique_only, an image is skipped when it is a copy of one already yielded: the same bytes (sha256),
     or the same picture re-saved (perceptual distance <= max_distance). Many NFS folders hold the same
-    upload dozens of times. Used by the detector sweep and preview, so both see the same images."""
+    upload dozens of times. Used by build-ground-truth, so every card is counted once."""
     source = NfsZipSource(root, [folder])
     keys = source.list_keys()
     random.Random(seed).shuffle(keys)

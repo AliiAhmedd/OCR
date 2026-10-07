@@ -1,6 +1,6 @@
 """Shared labels and the small records that move between the pipeline steps.
 
-Every step (source -> detector -> classifier -> routing -> storage) passes these records along,
+Every step (source -> detector -> classifier -> routing -> report) passes these records along,
 so this file is the one place that defines what a "label" is.
 """
 
@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from PIL import Image
 
-# --- Label taxonomy. Changing it means changing these tuples (and the VLM prompt later). ---
+# --- Label taxonomy. Changing it means changing these tuples. ---
 DOCUMENT_TYPES = ("national_id", "passport", "residence_permit", "driving_license", "other", "none")
 DOCUMENT_SIDES = ("front", "back", "n/a", "unknown")  # "n/a" for single-page documents (passport) and for "none"
 UNKNOWN = "unknown"    # country (or side) the classifier could not decide
@@ -46,7 +46,7 @@ def label_problems(document_type: str | None, issuing_country: str | None, docum
 
 
 def make_region_id(transaction_id: int, image_id: str, detector_name: str, index: int | str) -> str:
-    """Region ids look like '900000001:front:full_image:0'. The detector name is part of the id,
+    """Region ids look like '1576404:front:yoloe26s:0'. The detector name is part of the id,
     so regions from two different detectors never collide in the database."""
     return f"{transaction_id}:{image_id}:{detector_name}:{index}"
 
@@ -76,7 +76,7 @@ class Region:
     transaction_id: int                  # link back to the parent image
     image_id: str
     bbox: tuple[int, int, int, int]      # (x0, y0, x1, y1) in pixels of the parent image
-    confidence: float                    # detector confidence, 1.0 for FullImageDetector
+    confidence: float                    # detector confidence, 0.0 for YoloDetector's whole-image fallback
     detector_name: str
     crop: Image.Image | None = None      # the cut-out region that goes to the classifier (not stored in the DB)
 

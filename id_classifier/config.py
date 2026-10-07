@@ -1,11 +1,11 @@
 """Config: read YAML files and build components from them.
 
 A component is written in YAML as a small dict with a `type` and its settings, for example
-    classifier: {type: vlm, name: qwen_vl, model: "qwen2.5vl:7b"}
+    classifier: {type: knn, name: dinov2_knn, references: data/ground_truth.csv, ...}
 `type` picks the class from the table below; every other key is passed to the class constructor.
 
-Classes are listed as "module:ClassName" strings and imported only when used, so a configuration
-only imports the heavy libraries (torch, ultralytics, ollama) of the components it actually uses.
+Classes are listed as "module:ClassName" strings and imported only when used, so the heavy libraries
+(torch, ultralytics, transformers) load only when a configuration needs them.
 """
 
 from __future__ import annotations
@@ -17,21 +17,13 @@ from typing import Any
 import yaml
 
 REGISTRY = {
-    "source": {
-        "local_folder": "id_classifier.sources:LocalFolderSource",
-        "nfs_zip": "id_classifier.sources:NfsZipSource",
-    },
     "detector": {
-        "full_image": "id_classifier.detectors:FullImageDetector",
         "yolo": "id_classifier.detectors:YoloDetector",          # needs the [yolo] extra (ultralytics)
     },
     "classifier": {
         "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [embeddings] extra
-        "yolo_cls": "id_classifier.classifiers.yolo_cls:YoloClsClassifier",   # needs the [yolo] extra + train-cls
     },
 }
-
-DEFAULT_DETECTOR = {"type": "full_image"}
 
 
 def load_yaml(path: str | Path) -> dict:
@@ -40,7 +32,7 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def build(kind: str, spec: dict) -> Any:
-    """Creates one component (kind = "source" | "detector" | "classifier") from its YAML dict."""
+    """Creates one component (kind = "detector" | "classifier") from its YAML dict."""
     settings = dict(spec)                     # copy, so the caller's dict is not changed
     type_name = settings.pop("type", None)
     options = REGISTRY[kind]
@@ -51,12 +43,10 @@ def build(kind: str, spec: dict) -> Any:
     return cls(**settings)
 
 
-def build_source(spec: dict):
-    return build("source", spec)
-
-
-def build_detector(spec: dict | None):
-    return build("detector", spec or DEFAULT_DETECTOR)
+def build_detector(spec: dict):
+    if not spec:
+        raise ValueError("A detector is needed, e.g. detector: {type: yolo, ...}")
+    return build("detector", spec)
 
 
 def build_classifiers(specs: list[dict]) -> list:

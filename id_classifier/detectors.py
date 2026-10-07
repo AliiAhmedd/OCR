@@ -27,32 +27,6 @@ class Detector(ABC):
         """Returns the document regions found in record.image ([] when none)."""
 
 
-class FullImageDetector(Detector):
-    """Baseline without a model: treats the whole image as one document region.
-
-    Deciding "is there a document at all?" is then left to the classifier (document_type "none").
-    """
-
-    def __init__(self, name: str = "full_image"):
-        self.name = name
-
-    def detect(self, record: ImageRecord) -> list[Region]:
-        if record.image is None:                 # the fetch failed: nothing to look at
-            return []
-        width, height = record.image.size
-        return [
-            Region(
-                region_id=make_region_id(record.transaction_id, record.image_id, self.name, 0),
-                transaction_id=record.transaction_id,
-                image_id=record.image_id,
-                bbox=(0, 0, width, height),
-                confidence=1.0,
-                detector_name=self.name,
-                crop=record.image,               # no copy needed: nothing modifies the image
-            )
-        ]
-
-
 class YoloDetector(Detector):
     """Finds documents with an Ultralytics YOLO model and crops them out of the image.
 

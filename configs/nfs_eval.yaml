@@ -1,72 +1,46 @@
-# Evaluation on the labeled NFS folders (real ID images, labels from folder + file name)."
-#   python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 50
+# Evaluation of the ID classifier on the labeled NFS folders (see README.md).
+#   python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 150
 #   python -m id_classifier evaluate --config configs/nfs_eval.yaml
 # Paths are relative to the folder you run the command from (the repo root).
 
 experiment_name: nfs_eval
 ground_truth: data/ground_truth.csv
 output_dir: data/runs
-repeats: 1                     # raise to 3 once a model's latency or sampling varies between runs
+repeats: 1                     # the pipeline is deterministic: every repeat gives the same result
 
 routing:
-  confidence_threshold: 0.8    # below this a result goes to review
+  confidence_threshold: 0.8    # combined confidence below this -> human review
 
-# Fixed BEFORE looking at the results (agreed rule). The NFS folders hold no "no document" images,
-# so negative_rejection_rate is not measured (and not required) until such images are added.
-selection_rule: # selection rules for the "best" configuration 
+# Fixed BEFORE looking at the results. negative_rejection_rate is only checked when the ground truth
+# contains no-document images (it currently does not).
+selection_rule:
   min_negative_rejection_rate: 0.95
   max_parse_error_rate: 0.02
   primary_metric: country_accuracy_macro   # highest wins
   tie_breaker: latency_mean_ms             # lowest wins on a tie
 
-# Shared detector: YOLOE-26 with the best prompts of the sweep (progress.md rows 5-6) + whole-image fallback.
+# Detector: YOLOE-26 (Ultralytics, open vocabulary) finds the document and crops it.
 yoloe: &yoloe
   type: yolo
   name: yoloe26s
-  weights: yoloe-26s-seg.pt
-  prompts: ["id card", "card"]
-  confidence: 0.15
-  duplicate_iou: 0.7
+  weights: yoloe-26s-seg.pt      # downloaded on first use
+  prompts: ["id card", "card"]   # best prompt set of the detector sweep
+  confidence: 0.15               # boxes below this are ignored
+  duplicate_iou: 0.7             # two boxes overlapping more than this = the same document
   image_size: 640
-  fallback_full_image: true
+  fallback_full_image: true      # no box (close-ups) -> the whole image is the document
 
-# Each configuration = one detector + one or more classifiers (more than one = ensemble).
 configurations:
-  # A: DINOv2 embedding + k nearest labeled references. References = this ground truth, cropped by the
-  #    same detector; each image skips its own picture (leave-one-out), so the score is honest.
+  # Config A: YOLOE-26 crop -> DINOv2 embedding -> k nearest labeled references.
+  # References = the ground-truth images, cropped by the same detector. Each image skips its own
+  # picture (leave-one-out), so it is always classified by OTHER cards: an honest score.
   - name: A_yoloe+dinov2_knn
     detector: *yoloe
     classifiers:
       - type: knn
         name: dinov2_knn
-        model: facebook/dinov2-small
+        model: facebook/dinov2-small   # downloaded on first use
         references: data/ground_truth.csv
         reference_detector: *yoloe
         k: 5
-        min_similarity: 0.72       # below this: "unknown". Calibrated on run nfs_eval_20261006-130940 (progress.md row 12)
-
-  # B: YOLO26 classification model trained on our crops (train-cls). Each image is classified by the fold
-  #    model that never saw it (5-fold cross-validation), so the score is honest.
-  - name: B_yoloe+yolo26_cls
-    detector: *yoloe
-    classifiers:
-      - type: yolo_cls
-        name: yolo26_cls
-        models_dir: models/yolo26_cls
-        min_probability: 0.5       # below this: "unknown"
-
-  # D: ensemble of A and B. The router votes; any disagreement goes to review.
-  - name: D_yoloe+knn+yolo26_cls
-    detector: *yoloe
-    classifiers:
-      - type: knn
-        name: dinov2_knn
-        model: facebook/dinov2-small
-        references: data/ground_truth.csv
-        reference_detector: *yoloe
-        k: 5
-        min_similarity: 0.72
-      - type: yolo_cls
-        name: yolo26_cls
-        models_dir: models/yolo26_cls
-        min_probability: 0.5
+        min_similarity: 0.72           # nearest reference less similar than this -> "unknown" -> review
