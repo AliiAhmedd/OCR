@@ -32,6 +32,7 @@ Tick a question off (and write the answer under it) once it is answered.
       `AZURE_CONTAINER`, `GS_BUCKET_NAME`, any `location` prefix.)
 - [ ] **Q4.** What folder do the absolute `/…/x.zip` and relative `./…/x.zip` paths start from? Is it the NFS mount,
       and how does it map to the bucket root (which prefix to strip)?
+      *Used by:* `strip_prefixes` of `storage_key()` in `id_classifier/references.py` (e.g. `["/mnt/nfs", "media"]`).
 - [ ] **Q5.** Inside the cloud copies, is each `.zip` the same as on NFS (`original.jpeg` inside), or base64 text of a
       resized `.jpg` (as we were told)?
 
