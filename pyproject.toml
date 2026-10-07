@@ -10,12 +10,19 @@ requires-python = ">=3.11"
 dependencies = [
     "pillow>=10.1",      # images
     "pyyaml>=6.0",       # configs
+    "sqlalchemy>=2.0",   # storage on SQLite (local) or Postgres (Airflow)
 ]
 
 [project.optional-dependencies]
 # Everything configuration A needs: YOLOE-26 detector (ultralytics), DINOv2 kNN classifier (torch,
 # transformers, numpy) and the confusion-matrix PNG (matplotlib). Install torch CPU-only first (README).
 models = ["ultralytics>=8.3", "torch>=2.2", "transformers>=4.49", "numpy", "matplotlib>=3.8"]
+postgres = ["psycopg[binary]>=3.1"]                          # Postgres driver outside Airflow
+dev = ["pytest>=8"]                                          # tests
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]                                       # lets tests import fakes.py
 
 [tool.setuptools.packages.find]
 include = ["id_classifier*"]
