@@ -405,6 +405,18 @@ def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingCon
     return outcome
 
 
+def _progress_line(number: int, total: int, truth: GroundTruth, outcome: ImageOutcome) -> str:
+    """One log line per image so a run can be followed live, e.g.
+    'classifying 37/161: predicted JOR (0.91), true JOR [correct]'."""
+    predicted, true = _cm_pred(outcome), _cm_true(truth)
+    confidence = outcome.summary.confidence
+    verdict = "correct" if predicted == true else "WRONG"
+    if outcome.summary.needs_review:
+        verdict += ", review"
+    return (f"classifying {number}/{total}: predicted {predicted} ({_fmt(confidence)}), "
+            f"true {true} [{verdict}]")
+
+
 def run_experiment(config_path: str | Path) -> ExperimentResult:
     config_path = Path(config_path)
     config = load_yaml(config_path)
@@ -432,7 +444,11 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
         classifiers = build_classifiers(spec.get("classifiers", []))   # models are loaded once per configuration
         per_repeat, prediction_log = [], []
         for repeat in range(1, repeats + 1):
-            outcomes = [_evaluate_one(t, detector, classifiers, routing) for t in truths]
+            outcomes = []
+            for number, t in enumerate(truths, start=1):
+                outcome = _evaluate_one(t, detector, classifiers, routing)
+                outcomes.append(outcome)
+                log.info("%s", _progress_line(number, len(truths), t, outcome))
             fetch_failed = sum(o.record.fetch_status != "ok" for o in outcomes)
             per_repeat.append(compute_metrics(truths, outcomes))
             for t, o in zip(truths, outcomes):
