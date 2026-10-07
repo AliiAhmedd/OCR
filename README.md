@@ -111,14 +111,17 @@ real accuracy needs more distinct images per country.
 | `ocr_error_extract.py` | Step 1: Airflow DAG copying the 4201 transactions from Core into `ocr_error_4201` |
 | `id_classifier/__main__.py` | The two commands |
 | `id_classifier/ground_truth.py` | Builds the answer key from the NFS folders |
-| `id_classifier/sources.py` | Reads NFS zips in memory; exact + perceptual de-duplication |
+| `id_classifier/sources.py` | Gets the image bytes, then reads them in memory (NFS zip, base64 text or plain image); exact + perceptual de-duplication |
 | `id_classifier/detectors.py` | YOLOE-26 document detector and cropping |
 | `id_classifier/classifiers/knn.py` | DINOv2 embedding + k-nearest-neighbour classifier |
 | `id_classifier/routing.py` | Auto-accept vs human review |
-| `id_classifier/pipeline.py` | One image: detect -> classify -> route |
+| `id_classifier/pipeline.py` | One image: detect -> classify -> route; `run_classification()` loops over a source and stores the results |
+| `id_classifier/storage.py` | The pipeline's own tables (images, regions, predictions, reviews) on SQLite or Postgres |
 | `id_classifier/evaluate.py` | Runs every image, scores it, writes the report |
 | `id_classifier/config.py`, `types.py` | YAML -> components; shared labels and records |
 | `configs/nfs_eval.yaml` | The configuration (detector + classifier settings) |
+| `tests/` | Automated tests with fake images and models (`python -m pytest`) |
+| `CLIhelp.md`, `progress.md`, `OPEN_QUESTIONS.md` | Every command; journal of every trial; questions for the supervisors |
 
 ## Privacy
 

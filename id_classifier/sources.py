@@ -4,12 +4,16 @@ Every source answers two questions:
 - list_keys(): which images exist? -> (transaction_id, image_id, reference) tuples
 - fetch(...):  give me one image    -> ImageRecord (a failed fetch is returned as a record, never raised)
 
-Images on the NFS share are stored one per zip (see NfsZipSource). read_image_file() opens both plain
-image files and those zips, so the evaluation harness can point a ground-truth CSV at either.
+Reading one image is two steps, so a new storage (e.g. a cloud bucket) only has to provide the first:
+1. get the bytes:     read_local_bytes() (a file on disk or the NFS share)
+2. read the payload:  record_from_payload() works out what the bytes are (an NFS zip holding original.jpeg,
+                      base64 text, or a plain image file) and decodes the image.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import io
 import logging
@@ -33,6 +37,9 @@ NFS_ZIP_PATTERN = re.compile(
     r"^(?P<transaction_id>\d+)_\d{4}-\d{2}-\d{2}_[\d.-]+_(?P<image_id>front|back)_(?:img|url)\.zip$"
 )
 ZIP_IMAGE_MEMBER = "original.jpeg"  # the uploaded image inside every NFS zip
+ZIP_MAGIC = b"PK\x03\x04"           # first bytes of every zip file
+BASE64_TEXT = re.compile(rb"^[A-Za-z0-9+/_-]+={0,2}$")  # standard or URL-safe alphabet, whitespace already removed
+MAX_PAYLOAD_LAYERS = 3              # e.g. zip -> base64 -> jpeg; stops a file that unpacks forever
 
 
 class ImageSource(ABC):
@@ -64,21 +71,58 @@ def record_from_bytes(transaction_id: int, image_id: str, reference: str, data: 
     return ImageRecord(transaction_id, image_id, reference, image=image, image_hash=image_hash)
 
 
-def read_zip_member(path: str | Path, member: str = ZIP_IMAGE_MEMBER) -> bytes:
-    """Reads one file out of a zip in memory (the image is never written to disk)."""
-    with zipfile.ZipFile(path) as archive:
-        return archive.read(member)
+def base64_text(data: bytes) -> bytes | None:
+    """The base64 text inside `data` (data-URI prefix and whitespace removed, padding added), or None when
+    `data` is not base64 text. A real image or zip always has non-ASCII bytes, so it never matches."""
+    if not data.isascii():
+        return None
+    if data.startswith(b"data:"):                 # data:image/jpeg;base64,<text>
+        data = data.partition(b",")[2]
+    text = b"".join(data.split())                 # base64 is often wrapped over several lines
+    if not text or not BASE64_TEXT.match(text):
+        return None
+    return text + b"=" * (-len(text) % 4)         # some writers drop the trailing '=' padding
+
+
+def unpack_payload(data: bytes) -> bytes:
+    """Unwraps stored bytes down to the image file bytes: an NFS zip -> its original.jpeg, base64 text ->
+    the decoded bytes, anything else is returned as it is (Pillow decides whether it is an image).
+    Layers can be nested (a zip holding base64 text). Raises zipfile.BadZipFile / KeyError for a broken zip
+    or one without original.jpeg, binascii.Error for broken base64."""
+    for _ in range(MAX_PAYLOAD_LAYERS):
+        if data.startswith(ZIP_MAGIC):
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:   # in memory, never written to disk
+                data = archive.read(ZIP_IMAGE_MEMBER)
+        elif (text := base64_text(data)) is not None:
+            data = base64.b64decode(text.replace(b"-", b"+").replace(b"_", b"/"), validate=True)
+        else:
+            break
+    return data
+
+
+def record_from_payload(transaction_id: int, image_id: str, reference: str, data: bytes) -> ImageRecord:
+    """Stored bytes (zip / base64 / plain image) -> ImageRecord. Every source calls this after getting the bytes."""
+    try:
+        image_data = unpack_payload(data)
+    except (zipfile.BadZipFile, KeyError) as exc:   # broken zip, or no original.jpeg inside
+        return failed_record(transaction_id, image_id, reference, f"zip_error: {type(exc).__name__}")
+    except binascii.Error as exc:                   # looked like base64 but does not decode
+        return failed_record(transaction_id, image_id, reference, f"base64_error: {type(exc).__name__}")
+    return record_from_bytes(transaction_id, image_id, reference, image_data)
+
+
+def read_local_bytes(path: str | Path) -> bytes:
+    """The bytes of a file on disk or on the NFS share."""
+    return Path(path).read_bytes()
 
 
 def read_image_file(transaction_id: int, image_id: str, path: str | Path) -> ImageRecord:
-    """Reads one image from disk: a plain image file, or an NFS zip holding original.jpeg."""
+    """Reads one image from disk: a plain image file, an NFS zip holding original.jpeg, or base64 text."""
     try:
-        data = read_zip_member(path) if Path(path).suffix.lower() == ".zip" else Path(path).read_bytes()
+        data = read_local_bytes(path)
     except OSError as exc:
         return failed_record(transaction_id, image_id, str(path), f"read_error: {type(exc).__name__}")
-    except (zipfile.BadZipFile, KeyError) as exc:  # not a zip, or no original.jpeg inside
-        return failed_record(transaction_id, image_id, str(path), f"zip_error: {type(exc).__name__}")
-    return record_from_bytes(transaction_id, image_id, str(path), data)
+    return record_from_payload(transaction_id, image_id, str(path), data)
 
 
 class NfsZipSource(ImageSource):
