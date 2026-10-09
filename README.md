@@ -112,6 +112,7 @@ real accuracy needs more distinct images per country.
 | `id_classifier/__main__.py` | The two commands |
 | `id_classifier/ground_truth.py` | Builds the answer key from the NFS folders |
 | `id_classifier/sources.py` | Gets the image bytes, then reads them in memory (NFS zip, base64 text or plain image); exact + perceptual de-duplication |
+| `id_classifier/fetchers.py` | Gets the stored bytes of one image from a cloud bucket (S3 now; Azure Blob and GCS next), read-only |
 | `id_classifier/references.py` | Turns an image reference from Core (`media/...`, `/...`, `./...`) into one storage key |
 | `id_classifier/detectors.py` | YOLOE-26 document detector and cropping |
 | `id_classifier/classifiers/knn.py` | DINOv2 embedding + k-nearest-neighbour classifier |

@@ -43,7 +43,10 @@ The tests need no PyTorch, so they also run on Windows in the repo's `.venv`:
 ```
 
 Expected: all pass. The tests use tiny generated images and fake models (`tests/fakes.py`). They check our
-own code (storage, pipeline), not the real models.
+own code (storage, pipeline, image payloads, references, cloud fetchers), not the real models.
+
+The cloud tests need the `dev` extra (`pip install -e ".[dev]"`: boto3 + moto). moto fakes S3 in memory, so
+no AWS account, network or real image is used. Without the extra, those tests are skipped, not failed.
 
 ## build-ground-truth
 

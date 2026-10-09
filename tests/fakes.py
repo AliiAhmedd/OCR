@@ -31,6 +31,14 @@ def image_bytes(color: tuple[int, int, int], fmt: str = "PNG") -> bytes:
     return buffer.getvalue()
 
 
+def zip_bytes(data: bytes, member: str = "original.jpeg") -> bytes:
+    """The bytes of an NFS-style zip holding `data` as original.jpeg (for storages that hold bytes, not files)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member, data)
+    return buffer.getvalue()
+
+
 def write_nfs_zip(folder: Path, transaction_id: int, side: str, color: tuple[int, int, int]) -> Path:
     """A zip shaped like the NFS ones: <txn>_<date>_<time>_<side>_img.zip holding original.jpeg."""
     folder.mkdir(parents=True, exist_ok=True)
