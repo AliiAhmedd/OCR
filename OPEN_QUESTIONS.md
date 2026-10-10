@@ -39,6 +39,12 @@ Tick a question off (and write the answer under it) once it is answered.
 ### Credentials and encryption
 - [ ] **Q6.** "Public and private keys" for the clouds: is this the access key id + secret (S3), account name + key or
       SAS (Azure), HMAC or service-account JSON (GCS)? How will the pipeline receive them (env vars, Airflow connection)?
+      *Used by:* `credential_source` of `AzureBlobFetcher` in `id_classifier/fetchers.py` — `"sas"`
+      (`AZURE_STORAGE_SAS_TOKEN`), `"connection_string"` (`AZURE_STORAGE_CONNECTION_STRING`) or `"identity"`
+      (service principal / managed identity). It is on `"auto"` until this is answered, and should then be set
+      explicitly. A **read-only SAS** is the narrowest option and the one we would prefer; a connection string
+      carries the account key and so grants full access to the whole storage account.
+      S3 needs no code change either way: boto3 reads its own standard variables.
 - [ ] **Q7.** Are the image objects encrypted (cloud customer-provided key, or app-level encryption with the bundle's
       `transaction_data_apis_public_key`)? If so, which key decrypts them and can the pipeline use it?
 - [ ] **Q8.** `data` is Fernet-encrypted. Do we need anything from it? If yes, where is the Fernet key and may the

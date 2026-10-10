@@ -5,12 +5,13 @@ What the bytes are (zip / base64 / jpeg) is decided afterwards by sources.record
 for every storage. Fetchers are READ-ONLY: they never write, copy or delete anything.
 
 Credentials never live in code or YAML. Each cloud SDK finds them itself (environment variables, a
-profile file, or the identity of the machine it runs on); see the S3Fetcher docstring.
+profile file, or the identity of the machine it runs on); see each fetcher's docstring.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from abc import ABC, abstractmethod
 
 from id_classifier.sources import failed_record, record_from_payload
@@ -19,6 +20,11 @@ from id_classifier.types import ImageRecord
 log = logging.getLogger(__name__)
 
 MAX_OBJECT_BYTES = 50 * 1024 * 1024   # one ID image is well under 15 MB; bigger is refused before downloading
+
+
+def prefixed(prefix: str, key: str) -> str:
+    """The name of the stored object: the key under the folder where Core's files start (prefix may be "")."""
+    return f"{prefix}/{key}" if prefix else key
 
 
 class FetchError(Exception):
@@ -30,7 +36,7 @@ class FetchError(Exception):
 
 
 class Fetcher(ABC):
-    """Interface every storage implements (S3 now; Azure Blob and GCS next)."""
+    """Interface every storage implements (Amazon S3 and Azure Blob now; GCS next)."""
 
     name: str  # e.g. "s3:my-bucket", used in logs
 
@@ -106,7 +112,7 @@ class S3Fetcher(Fetcher):
         self.client = client
 
     def object_name(self, key: str) -> str:
-        return f"{self.prefix}/{key}" if self.prefix else key
+        return prefixed(self.prefix, key)
 
     def read_bytes(self, key: str) -> bytes:
         from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
@@ -127,3 +133,159 @@ class S3Fetcher(Fetcher):
             raise FetchError("no_credentials") from None
         except BotoCoreError as exc:            # endpoint unreachable, timeout, ...
             raise FetchError(f"connection_error: {type(exc).__name__}") from None
+
+
+# Azure storage error codes (the x-ms-error-code header) -> our reasons. Anything else: "azure_error: <code>".
+AZURE_REASONS = {
+    "BlobNotFound": "not_found",
+    "ResourceNotFound": "not_found",
+    "PathNotFound": "not_found",
+    "ContainerNotFound": "bucket_not_found",
+    "AuthenticationFailed": "bad_credentials",
+    "InvalidAuthenticationInfo": "bad_credentials",
+    "NoAuthenticationInformation": "bad_credentials",
+    "AuthorizationFailure": "access_denied",
+    "AuthorizationPermissionMismatch": "access_denied",   # RBAC role missing; not in the SDK's enum
+    "InsufficientAccountPermissions": "access_denied",
+    "AccountIsDisabled": "access_denied",
+}
+
+AZURE_CONNECTION_STRING_ENV = "AZURE_STORAGE_CONNECTION_STRING"
+AZURE_SAS_TOKEN_ENV = "AZURE_STORAGE_SAS_TOKEN"
+AZURE_IDENTITY_ENVS = ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET")   # a service principal
+CREDENTIAL_SOURCES = ("sas", "connection_string", "identity")
+
+AZURE_SINGLE_GET_BYTES = 16 * 1024 * 1024   # see AzureBlobFetcher.read_bytes: bounds a too-large download
+
+
+class AzureBlobFetcher(Fetcher):
+    """Reads blobs from one Azure Blob Storage container.
+
+    Credentials come from the environment only, never from an argument or YAML. `credential_source`
+    picks which one; "auto" (the default) takes the first that is usable, in this order:
+
+        1. "sas"               a read-only, time-limited SAS token in AZURE_STORAGE_SAS_TOKEN (+ `account`).
+                               Narrowest: scoped to what the token was signed for.
+        2. "connection_string" AZURE_STORAGE_CONNECTION_STRING (account name + account key). This is what a
+                               django-storages deployment usually sets, but the account key grants full
+                               access to the whole account, so it is not preferred over a SAS.
+        3. "identity"          DefaultAzureCredential (+ `account`): a service principal
+                               (AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET). No secret of ours.
+
+    An explicit secret wins over the ambient machine identity: if an operator exported a credential,
+    honouring it is predictable, whereas DefaultAzureCredential has its own internal chain (it will pick up
+    an Azure CLI login on a dev box) and fails slowly rather than fast. For the same reason "auto" only
+    reaches step 3 when the three service-principal variables are set: otherwise DefaultAzureCredential
+    would spend ~30 s probing IMDS, the Azure CLI and VS Code and then report `bad_credentials`, hiding a
+    deployment with no credentials at all behind a hang. To use a machine's **managed identity** (no
+    variables to detect), ask for it: `credential_source="identity"`.
+
+    Which one the real deployment uses is Q6 in OPEN_QUESTIONS.md; set `credential_source` explicitly once
+    that is answered instead of relying on "auto".
+
+    Permission needed: *Storage Blob Data Reader* on the container, or a SAS with read permission only.
+    The blob name is `prefix/key` (prefix = the folder inside the container where Core's files start).
+    """
+
+    def __init__(
+        self,
+        container: str,
+        prefix: str = "",
+        account: str | None = None,
+        account_url: str | None = None,
+        credential_source: str = "auto",
+        max_attempts: int = 3,
+        connect_timeout: float = 5,
+        read_timeout: float = 30,
+        max_bytes: int = MAX_OBJECT_BYTES,
+        single_get_bytes: int = AZURE_SINGLE_GET_BYTES,
+        client=None,
+    ):
+        if not container:
+            raise ValueError("AzureBlobFetcher needs a container name")
+        if credential_source != "auto" and credential_source not in CREDENTIAL_SOURCES:
+            raise ValueError(f"credential_source must be 'auto' or one of {CREDENTIAL_SOURCES}")
+        self.container = container
+        self.prefix = prefix.strip("/")
+        self.max_bytes = max_bytes
+        self.name = f"azure:{container}"
+        self.account_url = account_url or (f"https://{account}.blob.core.windows.net" if account else None)
+        self.credential_source = credential_source
+        self._settings = {
+            "retry_total": max_attempts,
+            "connection_timeout": connect_timeout,
+            "read_timeout": read_timeout,
+            "max_single_get_size": min(single_get_bytes, max_bytes),
+            "max_chunk_get_size": min(single_get_bytes, max_bytes),
+        }
+        self._client = client   # built on first use, so a missing credential is a failed record, not a crash
+
+    def blob_name(self, key: str) -> str:
+        return prefixed(self.prefix, key)
+
+    def container_client(self):
+        """The container client, built on first use (like boto3, credentials are resolved when first needed)."""
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
+
+    def _build_client(self):
+        # imported here: the azure packages are only needed when Azure is used
+        from azure.storage.blob import BlobServiceClient
+
+        wanted = CREDENTIAL_SOURCES if self.credential_source == "auto" else (self.credential_source,)
+        sas, connection_string = os.environ.get(AZURE_SAS_TOKEN_ENV), os.environ.get(AZURE_CONNECTION_STRING_ENV)
+        # "auto" only tries an identity when a service principal is configured; a managed identity has
+        # nothing to detect, so it has to be asked for (see the class docstring).
+        identity_usable = self.credential_source == "identity" or all(map(os.environ.get, AZURE_IDENTITY_ENVS))
+
+        for source in wanted:
+            if source == "sas" and sas and self.account_url:
+                service = BlobServiceClient(self.account_url, credential=sas, **self._settings)
+            elif source == "connection_string" and connection_string:
+                service = BlobServiceClient.from_connection_string(connection_string, **self._settings)
+            elif source == "identity" and self.account_url and identity_usable:
+                from azure.identity import DefaultAzureCredential
+
+                service = BlobServiceClient(self.account_url, credential=DefaultAzureCredential(), **self._settings)
+            else:
+                continue
+            log.info("Azure credentials for %s from %s", self.name, source)   # the source only, never the secret
+            return service.get_container_client(self.container)
+
+        raise FetchError("no_credentials")
+
+    def read_bytes(self, key: str) -> bytes:
+        """Downloads one blob. Unlike S3's GetObject, Azure's download_blob() already fetches its first
+        chunk, so `max_single_get_size` bounds that chunk: a too-large blob costs at most ~16 MB (well above
+        a real ID image, so a normal image is still a single request) instead of the whole object."""
+        from azure.core.exceptions import (
+            AzureError,
+            ClientAuthenticationError,
+            HttpResponseError,
+            ServiceRequestError,
+        )
+
+        try:
+            downloader = self.container_client().download_blob(self.blob_name(key), max_concurrency=1)
+            if downloader.size > self.max_bytes:
+                raise FetchError("too_large")
+            return downloader.readall()
+        except ClientAuthenticationError:       # subclass of HttpResponseError, so caught before it
+            raise FetchError("bad_credentials") from None
+        except ServiceRequestError as exc:      # DNS, TLS, connect / read timeout, after the retries
+            raise FetchError(f"connection_error: {type(exc).__name__}") from None
+        except HttpResponseError as exc:        # covers ResourceNotFoundError (blob or container missing)
+            raise FetchError(azure_reason(exc)) from None
+        except AzureError as exc:               # anything else the SDK raises
+            raise FetchError(f"connection_error: {type(exc).__name__}") from None
+
+
+def azure_reason(exc) -> str:
+    """Our short reason for an Azure HttpResponseError, from the x-ms-error-code the SDK attached to it."""
+    code = getattr(exc, "error_code", None)
+    code = getattr(code, "value", code)         # StorageErrorCode is an enum: take its string ("BlobNotFound")
+    if code:
+        return AZURE_REASONS.get(code, f"azure_error: {code}")
+    status = getattr(exc, "status_code", None)  # no x-ms-error-code header: fall back to the status
+    return {403: "access_denied", 404: "not_found"}.get(status, f"azure_error: {status or type(exc).__name__}")
