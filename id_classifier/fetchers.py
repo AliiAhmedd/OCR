@@ -36,7 +36,7 @@ class FetchError(Exception):
 
 
 class Fetcher(ABC):
-    """Interface every storage implements (Amazon S3 and Azure Blob now; GCS next)."""
+    """Interface every storage implements: Amazon S3, Azure Blob Storage, Google Cloud Storage."""
 
     name: str  # e.g. "s3:my-bucket", used in logs
 
@@ -289,3 +289,99 @@ def azure_reason(exc) -> str:
         return AZURE_REASONS.get(code, f"azure_error: {code}")
     status = getattr(exc, "status_code", None)  # no x-ms-error-code header: fall back to the status
     return {403: "access_denied", 404: "not_found"}.get(status, f"azure_error: {status or type(exc).__name__}")
+
+
+GCS_RETRY_TIMEOUT = 60      # seconds the SDK may keep retrying throttling / 5xx / connection errors
+
+
+class GcsFetcher(Fetcher):
+    """Reads objects from one Google Cloud Storage bucket.
+
+    Credentials: Application Default Credentials, which the SDK resolves itself, in this order: the
+    service-account JSON file named by GOOGLE_APPLICATION_CREDENTIALS, then a gcloud user login, then the
+    service account of the machine (GKE workload identity / Compute Engine). They are never passed in here.
+    Unlike Azure there is no choice to make: this is a real standard chain, like boto3's.
+    Permission needed: *Storage Object Viewer* (`roles/storage.objectViewer`) on the bucket.
+
+    If Q6 says Core uses **HMAC keys** instead, no GCS code is needed at all: GCS also speaks the S3
+    protocol, so `S3Fetcher(bucket, endpoint_url="https://storage.googleapis.com")` reads it.
+
+    The object name is `prefix/key` (prefix = the folder inside the bucket where Core's files start).
+    """
+
+    def __init__(
+        self,
+        bucket: str,
+        prefix: str = "",
+        project: str | None = None,
+        retry_timeout: float = GCS_RETRY_TIMEOUT,
+        connect_timeout: float = 5,
+        read_timeout: float = 30,
+        max_bytes: int = MAX_OBJECT_BYTES,
+        client=None,
+    ):
+        if not bucket:
+            raise ValueError("GcsFetcher needs a bucket name")
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        self.project = project
+        self.max_bytes = max_bytes
+        self.name = f"gcs:{bucket}"
+        self.timeout = (connect_timeout, read_timeout)
+        self.retry_timeout = retry_timeout
+        self._client = client   # built on first use, so a missing credential is a failed record, not a crash
+
+    def object_name(self, key: str) -> str:
+        return prefixed(self.prefix, key)
+
+    def bucket_client(self):
+        """The bucket handle, built on first use (Client() is what raises when there are no credentials)."""
+        if self._client is None:
+            from google.cloud.storage import Client   # imported here: only needed when GCS is used
+
+            self._client = (Client(project=self.project) if self.project else Client()).bucket(self.bucket)
+        return self._client
+
+    def read_bytes(self, key: str) -> bytes:
+        """Reads the object's metadata first, so an oversized object is refused before it is downloaded.
+        That is one extra round trip per image, which GCS gives no way around: download_as_bytes() returns
+        the whole object and reports no size beforehand."""
+        from google.api_core.exceptions import (
+            Forbidden,
+            GoogleAPICallError,
+            NotFound,
+            RetryError,
+            Unauthorized,
+        )
+        from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError, TransportError
+        from google.cloud.storage.retry import DEFAULT_RETRY
+        from requests.exceptions import RequestException
+
+        retry = DEFAULT_RETRY.with_timeout(self.retry_timeout)
+        try:
+            blob = self.bucket_client().blob(self.object_name(key))
+            blob.reload(timeout=self.timeout, retry=retry)      # metadata: gives .size, and 404s if missing
+            if (blob.size or 0) > self.max_bytes:
+                raise FetchError("too_large")
+            return blob.download_as_bytes(timeout=self.timeout, retry=retry)
+        except NotFound as exc:                 # both subclasses of GoogleAPICallError, so caught before it
+            raise FetchError(gcs_not_found_reason(exc)) from None
+        except Unauthorized:
+            raise FetchError("bad_credentials") from None
+        except Forbidden:
+            raise FetchError("access_denied") from None
+        except DefaultCredentialsError:         # the SDK found no credentials at all
+            raise FetchError("no_credentials") from None
+        except (TransportError, RetryError, RequestException) as exc:   # unreachable, or retried until the deadline
+            raise FetchError(f"connection_error: {type(exc).__name__}") from None
+        except GoogleAuthError:                 # RefreshError: a key that no longer works
+            raise FetchError("bad_credentials") from None
+        except GoogleAPICallError as exc:       # anything else the API returned, with its status
+            raise FetchError(f"gcs_error: {exc.code or type(exc).__name__}") from None
+
+
+def gcs_not_found_reason(exc) -> str:
+    """A missing bucket and a missing object are both a plain 404 with reason "notFound" and an empty
+    `errors` list, so only the message tells them apart. It degrades to the safer `not_found`."""
+    message = str(getattr(exc, "message", "") or exc)
+    return "bucket_not_found" if "bucket does not exist" in message else "not_found"

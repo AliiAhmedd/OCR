@@ -44,7 +44,10 @@ Tick a question off (and write the answer under it) once it is answered.
       (service principal / managed identity). It is on `"auto"` until this is answered, and should then be set
       explicitly. A **read-only SAS** is the narrowest option and the one we would prefer; a connection string
       carries the account key and so grants full access to the whole storage account.
-      S3 needs no code change either way: boto3 reads its own standard variables.
+      S3 and GCS need no code change either way: boto3 and google-cloud-storage both read their own standard
+      variables. But the answer does decide whether `GcsFetcher` is used at all — if Core uses GCS **HMAC
+      keys**, GCS speaks the S3 protocol and `S3Fetcher(endpoint_url="https://storage.googleapis.com")`
+      reads it, so `GcsFetcher` (service-account JSON / machine service account) would be dead code.
 - [ ] **Q7.** Are the image objects encrypted (cloud customer-provided key, or app-level encryption with the bundle's
       `transaction_data_apis_public_key`)? If so, which key decrypts them and can the pipeline use it?
 - [ ] **Q8.** `data` is Fernet-encrypted. Do we need anything from it? If yes, where is the Fernet key and may the
