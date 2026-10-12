@@ -1,0 +1,55 @@
+# Same experiment as nfs_eval.yaml (same ground truth, Config A), but the images are read from
+# MinIO (S3 emulator, docker-compose.yml) instead of the NFS share. Results must be identical.
+#   docker compose up -d && python scripts/seed_emulators.py
+#   export AWS_ACCESS_KEY_ID=rootuser AWS_SECRET_ACCESS_KEY=rootpass123
+#   python -m id_classifier evaluate --config configs/minio_eval.yaml
+
+experiment_name: minio_eval
+ground_truth: data/ground_truth.csv
+output_dir: data/runs
+source:                          # where the images are read from (default: the files on disk)
+  type: s3
+  bucket: ids
+  prefix: ""                     # objects sit at the bucket root (scripts/seed_emulators.py)
+  region: us-east-1
+  endpoint_url: http://127.0.0.1:9222
+  strip_prefixes: ["/mnt/nfs"]   # /mnt/nfs/<folder>/<file>.zip -> key <folder>/<file>.zip
+  # credentials: never here. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment.
+repeats: 1                     # the pipeline is deterministic: every repeat gives the same result
+
+routing:
+  confidence_threshold: 0.8    # combined confidence below this -> human review
+
+# Fixed BEFORE looking at the results. negative_rejection_rate is only checked when the ground truth
+# contains no-document images (it currently does not).
+selection_rule:
+  min_negative_rejection_rate: 0.95
+  max_parse_error_rate: 0.02
+  primary_metric: country_accuracy_macro   # highest wins
+  tie_breaker: latency_mean_ms             # lowest wins on a tie
+
+# Detector: YOLOE-26 (Ultralytics, open vocabulary) finds the document and crops it.
+yoloe: &yoloe
+  type: yolo
+  name: yoloe26s
+  weights: yoloe-26s-seg.pt      # downloaded on first use
+  prompts: ["id card", "card"]   # best prompt set of the detector sweep
+  confidence: 0.15               # boxes below this are ignored
+  duplicate_iou: 0.7             # two boxes overlapping more than this = the same document
+  image_size: 640
+  fallback_full_image: true      # no box (close-ups) -> the whole image is the document
+
+configurations:
+  # Config A: YOLOE-26 crop -> DINOv2 embedding -> k nearest labeled references.
+  # References = the ground-truth images, cropped by the same detector. Each image skips its own
+  # picture (leave-one-out), so it is always classified by OTHER cards: an honest score.
+  - name: A_yoloe+dinov2_knn
+    detector: *yoloe
+    classifiers:
+      - type: knn
+        name: dinov2_knn
+        model: facebook/dinov2-small   # downloaded on first use
+        references: data/ground_truth.csv
+        reference_detector: *yoloe
+        k: 5
+        min_similarity: 0.72           # nearest reference less similar than this -> "unknown" -> review

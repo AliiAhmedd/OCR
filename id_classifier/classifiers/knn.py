@@ -13,7 +13,7 @@
 Fair evaluation: a reference with similarity >= `exclude_self_above` is the query image itself (the
 ground truth is both reference set and test set), so it is skipped: leave-one-out.
 
-Needs the [embeddings] extra (torch, transformers). Tests pass their own `embedder`.
+Needs the [models] extra (torch, transformers). Tests pass their own `embedder`.
 """
 
 from __future__ import annotations

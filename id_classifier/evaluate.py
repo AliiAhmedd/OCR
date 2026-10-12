@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from id_classifier.config import build_classifiers, build_detector, load_yaml
+from id_classifier.config import build_classifiers, build_detector, build_source, load_yaml
 from id_classifier.pipeline import ImageOutcome, process_image
 from id_classifier.routing import RoutingConfig
 from id_classifier.sources import read_image_file
@@ -71,6 +71,7 @@ class GroundTruth:
     document_type: str
     issuing_country: str
     document_side: str
+    reference: str = ""        # image_path exactly as written in the CSV: what a `source` turns into a storage key
 
     @property
     def is_document(self) -> bool:
@@ -132,7 +133,7 @@ def read_ground_truth(csv_path: str | Path) -> list[GroundTruth]:
             path = Path(row["image_path"])
             truths.append(GroundTruth(
                 key[0], key[1], path if path.is_absolute() else csv_path.parent / path,
-                row["document_type"], row["issuing_country"], row["document_side"],
+                row["document_type"], row["issuing_country"], row["document_side"], row["image_path"],
             ))
     if not truths:
         raise ValueError(f"{csv_path}: no rows")
@@ -363,6 +364,7 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         + f", {dataset_info['fetch_failed']} could not be loaded)",
         f"- Repeats per configuration: {dataset_info['repeats']}",
         f"- Routing: {dataset_info['routing']}",
+        f"- Images read from: {dataset_info.get('source', 'local files')}",
         f"- Selection rule (fixed before the run): {rule.describe()}",
         "",
         f"## Winner: **{winner}**" if winner else "## Winner: none. No configuration meets the selection rule.",
@@ -394,10 +396,14 @@ def write_predictions(out_dir: Path, name: str, rows: list[list]) -> None:
 
 # ---------------------------------------------------------------- main entry point
 
-def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingConfig) -> ImageOutcome:
+def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingConfig, source=None) -> ImageOutcome:
     """Loads one image, runs it, then drops the pixels: only labels and timings are kept, so memory stays
-    flat however large the ground truth is (images are re-read for every configuration and repeat)."""
-    record = read_image_file(truth.transaction_id, truth.image_id, truth.image_path)
+    flat however large the ground truth is (images are re-read for every configuration and repeat).
+    Without a source the image is read from disk; with one (YAML `source:`), from that storage."""
+    if source is None:
+        record = read_image_file(truth.transaction_id, truth.image_id, truth.image_path)
+    else:
+        record = source.fetch(truth.transaction_id, truth.image_id, truth.reference)
     outcome = process_image(record, detector, classifiers, routing)
     record.image = None
     for region in outcome.regions:
@@ -435,6 +441,10 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
     documents = sum(t.is_document for t in truths)
     log.info("Ground truth: %d images (%d documents, %d negatives)", len(truths), documents, len(truths) - documents)
 
+    source = build_source(config.get("source"))   # None = read the ground-truth files from disk
+    source_name = getattr(source, "name", None) or (config.get("source") or {}).get("type") or "local files"
+    log.info("Images read from: %s", source_name)
+
     out_dir = _new_run_dir(Path(config.get("output_dir", "data/runs")), name)
     shutil.copyfile(config_path, out_dir / "experiment.yaml")  # keep the exact config next to its results
 
@@ -446,7 +456,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
         for repeat in range(1, repeats + 1):
             outcomes = []
             for number, t in enumerate(truths, start=1):
-                outcome = _evaluate_one(t, detector, classifiers, routing)
+                outcome = _evaluate_one(t, detector, classifiers, routing, source)
                 outcomes.append(outcome)
                 log.info("%s", _progress_line(number, len(truths), t, outcome))
             fetch_failed = sum(o.record.fetch_status != "ok" for o in outcomes)
@@ -469,7 +479,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
     dataset_info = {
         "ground_truth": config["ground_truth"], "images": len(truths), "documents": documents,
         "negatives": len(truths) - documents, "fetch_failed": fetch_failed, "repeats": repeats,
-        "routing": routing.describe(),
+        "routing": routing.describe(), "source": source_name,
     }
     write_reports(out_dir, name, summaries, winner, notes, rule, dataset_info)
     log.info("Results written to %s (winner: %s)", out_dir, winner)

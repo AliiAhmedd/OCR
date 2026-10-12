@@ -14,7 +14,8 @@ import logging
 import os
 from abc import ABC, abstractmethod
 
-from id_classifier.sources import failed_record, record_from_payload
+from id_classifier.references import storage_key
+from id_classifier.sources import ImageKey, ImageSource, failed_record, record_from_payload
 from id_classifier.types import ImageRecord
 
 log = logging.getLogger(__name__)
@@ -108,7 +109,10 @@ class S3Fetcher(Fetcher):
                 connect_timeout=connect_timeout,
                 read_timeout=read_timeout,
             )
-            client = boto3.client("s3", region_name=region, endpoint_url=endpoint_url, config=config)
+            # A session of its own, not boto3.client(): the default session is process-wide and keeps the
+            # first credentials it resolves, so rotated keys (or a second fetcher) would silently reuse them.
+            session = boto3.session.Session()
+            client = session.client("s3", region_name=region, endpoint_url=endpoint_url, config=config)
         self.client = client
 
     def object_name(self, key: str) -> str:
@@ -385,3 +389,65 @@ def gcs_not_found_reason(exc) -> str:
     `errors` list, so only the message tells them apart. It degrades to the safer `not_found`."""
     message = str(getattr(exc, "message", "") or exc)
     return "bucket_not_found" if "bucket does not exist" in message else "not_found"
+
+
+# ---------------------------------------------------------------- fetchers as an image source (YAML: source)
+
+class FetcherSource(ImageSource):
+    """An ImageSource over any Fetcher: Core reference -> storage key (strip_prefixes) -> bytes -> image.
+
+    It cannot list a bucket (fetchers are read-only and only ever get one object), so which images to read
+    comes from outside: the ground truth today, the 4201 transactions in the database later.
+    """
+
+    def __init__(self, fetcher: Fetcher, strip_prefixes: list[str] | tuple[str, ...] = ()):
+        self.fetcher = fetcher
+        self.strip_prefixes = list(strip_prefixes)
+        self.name = fetcher.name
+
+    def list_keys(self) -> list[ImageKey]:
+        raise NotImplementedError(f"{self.name}: a bucket is never listed; the keys come from the ground truth "
+                                  "or the database")
+
+    def fetch(self, transaction_id: int, image_id: str, reference: str) -> ImageRecord:
+        try:
+            key = storage_key(reference, self.strip_prefixes)
+        except ValueError:                      # empty, a URL, ".." ...: never sent to the storage
+            return failed_record(transaction_id, image_id, reference, "bad_reference")
+        return fetch_record(self.fetcher, transaction_id, image_id, key)
+
+
+# Setting names that would mean a secret was written into the YAML. Credentials come from the environment
+# only (see each fetcher), so these are refused with a pointer to the right variable instead.
+SECRET_SETTINGS = {
+    "s3": ("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY", ("access_key", "secret", "session_token", "password")),
+    "azure": ("AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_SAS_TOKEN",
+              ("connection_string", "account_key", "sas", "secret", "password")),
+    "gcs": ("GOOGLE_APPLICATION_CREDENTIALS", ("credentials", "key_file", "private_key", "secret", "password")),
+}
+
+
+def _refuse_secrets(provider: str, settings: dict) -> None:
+    env, words = SECRET_SETTINGS[provider]
+    found = sorted(k for k in settings if any(w in k.lower() for w in words) and k != "credential_source")
+    if found:
+        raise ValueError(f"source {provider}: {found} looks like a credential. Credentials never go in YAML; "
+                         f"set them in the environment ({env}).")
+
+
+def s3_source(strip_prefixes=(), **settings) -> FetcherSource:
+    """YAML: source: {type: s3, bucket: ..., prefix: ..., region: ..., endpoint_url: ..., strip_prefixes: [...]}"""
+    _refuse_secrets("s3", settings)
+    return FetcherSource(S3Fetcher(**settings), strip_prefixes)
+
+
+def azure_source(strip_prefixes=(), **settings) -> FetcherSource:
+    """YAML: source: {type: azure, container: ..., prefix: ..., account: ..., credential_source: ..., strip_prefixes: [...]}"""
+    _refuse_secrets("azure", settings)
+    return FetcherSource(AzureBlobFetcher(**settings), strip_prefixes)
+
+
+def gcs_source(strip_prefixes=(), **settings) -> FetcherSource:
+    """YAML: source: {type: gcs, bucket: ..., prefix: ..., project: ..., strip_prefixes: [...]}"""
+    _refuse_secrets("gcs", settings)
+    return FetcherSource(GcsFetcher(**settings), strip_prefixes)

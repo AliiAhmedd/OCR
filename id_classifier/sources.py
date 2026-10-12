@@ -133,7 +133,7 @@ class NfsZipSource(ImageSource):
     (4201 transaction id + its service name); list_keys() covers listing whole folders.
     """
 
-    def __init__(self, root: str | Path, folders: list[str]):
+    def __init__(self, root: str | Path = "/mnt/nfs", folders: list[str] = ()):
         self.root = Path(root)
         self.folders = list(folders)
 

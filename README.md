@@ -112,7 +112,7 @@ real accuracy needs more distinct images per country.
 | `id_classifier/__main__.py` | The two commands |
 | `id_classifier/ground_truth.py` | Builds the answer key from the NFS folders |
 | `id_classifier/sources.py` | Gets the image bytes, then reads them in memory (NFS zip, base64 text or plain image); exact + perceptual de-duplication |
-| `id_classifier/fetchers.py` | Gets the stored bytes of one image from a cloud bucket (S3 now; Azure Blob and GCS next), read-only |
+| `id_classifier/fetchers.py` | Gets the stored bytes of one image from Amazon S3, Azure Blob or Google Cloud Storage, read-only; `FetcherSource` makes a bucket an image source (`source:` in the YAML) |
 | `id_classifier/references.py` | Turns an image reference from Core (`media/...`, `/...`, `./...`) into one storage key |
 | `id_classifier/detectors.py` | YOLOE-26 document detector and cropping |
 | `id_classifier/classifiers/knn.py` | DINOv2 embedding + k-nearest-neighbour classifier |
@@ -121,11 +121,14 @@ real accuracy needs more distinct images per country.
 | `id_classifier/storage.py` | The pipeline's own tables (images, regions, predictions, reviews) on SQLite or Postgres |
 | `id_classifier/evaluate.py` | Runs every image, scores it, writes the report |
 | `id_classifier/config.py`, `types.py` | YAML -> components; shared labels and records |
-| `configs/nfs_eval.yaml` | The configuration (detector + classifier settings) |
+| `configs/nfs_eval.yaml` | The configuration (detector + classifier settings), images from the NFS share |
+| `configs/minio_eval.yaml`, `configs/azurite_eval.yaml` | The same experiment, images read from the local S3 / Azure emulators (identical results) |
+| `docker-compose.yml`, `scripts/seed_emulators.py` | Local cloud emulators (Azurite, MinIO) and the script that fills them with the ground-truth zips |
 | `tests/` | Automated tests with fake images and models (`python -m pytest`) |
 | `CLIhelp.md`, `progress.md`, `OPEN_QUESTIONS.md` | Every command; journal of every trial; questions for the supervisors |
 
 ## Privacy
 
 Images are read from the zips in memory and never written to disk; `data/` (ground truth, results,
-cached embeddings) is gitignored and never committed.
+cached embeddings) is gitignored and never committed. The local emulators listen on 127.0.0.1 only; real ID images
+are never uploaded to a real cloud for testing. Cloud credentials come from environment variables, never from YAML.

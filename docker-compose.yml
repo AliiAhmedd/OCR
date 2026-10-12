@@ -1,0 +1,48 @@
+# Local cloud-storage emulators for testing the fetchers (no cloud account, nothing leaves this machine).
+#   Azurite = Azure Blob Storage emulator (AzureBlobFetcher), MinIO = S3-compatible store (S3Fetcher).
+# Start: docker compose up -d      Stop: docker compose down      Wipe the data too: docker compose down -v
+# Ports are bound to 127.0.0.1 only: the seeded data may be real ID images, so nothing else on the network
+# may reach them. The credentials below are the emulators' well-known dev defaults, not real secrets.
+
+services:
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    container_name: azurite
+    hostname: azurite
+    ports:
+      - "127.0.0.1:10000:10000"   # blob (the only one the pipeline uses)
+      - "127.0.0.1:10001:10001"   # queue
+      - "127.0.0.1:10002:10002"   # table
+    volumes:
+      - azurite-volume:/data
+    # The image's default command + --skipApiVersionCheck: the azure-storage-blob SDK sends a newer API
+    # version (2026-10-06) than Azurite knows and is refused without it. Only checks the header, the blob API is the same.
+    command: ["azurite", "--location", "/data", "--blobHost", "0.0.0.0", "--queueHost", "0.0.0.0",
+              "--tableHost", "0.0.0.0", "--skipApiVersionCheck"]
+
+  minio:
+    # minio/minio was deleted from Docker Hub (2026-09-11) and quay.io needs a login since ~2026-09-24;
+    # Chainguard's build is the same MinIO server and still pulls anonymously.
+    image: cgr.dev/chainguard/minio
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=rootuser          # = AWS_ACCESS_KEY_ID for S3Fetcher
+      - MINIO_ROOT_PASSWORD=rootpass123   # = AWS_SECRET_ACCESS_KEY for S3Fetcher
+    networks:
+      - minio-network
+    volumes:
+      - minio-volume:/data
+    ports:
+      - "127.0.0.1:9222:9000"   # S3 API  -> S3Fetcher endpoint_url = http://127.0.0.1:9222
+      - "127.0.0.1:9223:9001"   # web console -> http://127.0.0.1:9223
+    command: ["server", "--console-address", ":9001", "/data"]
+
+networks:
+  minio-network:
+    driver: bridge
+
+volumes:
+  azurite-volume:
+    driver: local
+  minio-volume:
+    driver: local

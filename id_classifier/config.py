@@ -18,10 +18,18 @@ import yaml
 
 REGISTRY = {
     "detector": {
-        "yolo": "id_classifier.detectors:YoloDetector",          # needs the [yolo] extra (ultralytics)
+        "yolo": "id_classifier.detectors:YoloDetector",          # needs the [models] extra (ultralytics)
     },
     "classifier": {
-        "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [embeddings] extra
+        "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [models] extra (torch, transformers)
+    },
+    # Where the images are read from. Settings (bucket, prefix, endpoint, strip_prefixes) go in YAML;
+    # credentials never do: each SDK reads them from the environment (see fetchers.py).
+    "source": {
+        "nfs": "id_classifier.sources:NfsZipSource",       # files on disk / the NFS share (the default)
+        "s3": "id_classifier.fetchers:s3_source",          # needs the [s3] extra
+        "azure": "id_classifier.fetchers:azure_source",    # needs the [azure] extra
+        "gcs": "id_classifier.fetchers:gcs_source",        # needs the [gcs] extra
     },
 }
 
@@ -32,7 +40,7 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def build(kind: str, spec: dict) -> Any:
-    """Creates one component (kind = "detector" | "classifier") from its YAML dict."""
+    """Creates one component (kind = "detector" | "classifier" | "source") from its YAML dict."""
     settings = dict(spec)                     # copy, so the caller's dict is not changed
     type_name = settings.pop("type", None)
     options = REGISTRY[kind]
@@ -57,3 +65,8 @@ def build_classifiers(specs: list[dict]) -> list:
     if len(set(names)) != len(names):         # names are stored per prediction, so they must be unique
         raise ValueError(f"Classifier names must be unique within one configuration, got {names}")
     return classifiers
+
+
+def build_source(spec: dict | None):
+    """The image source of an experiment, or None when the YAML has no `source:` (= read files from disk)."""
+    return build("source", spec) if spec else None

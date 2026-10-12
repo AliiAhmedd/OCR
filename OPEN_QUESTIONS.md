@@ -25,6 +25,8 @@ Tick a question off (and write the answer under it) once it is answered.
 - [ ] **Q1.** Is our `OCR_data_full` a scrubbed / sample copy of production? Do production references look the same?
 - [ ] **Q2.** Are `services_transactiondatacontainer.meta_data` fields the right place to read a 4201 transaction's
       images? Which fields are authoritative per service (e.g. `front_url` vs `front_img` vs `dict_of_paths`)?
+- [ ] **D1.** Read access to the full QA / prod database? Needed to map real 4201 transactions to their files and to
+      get more distinct images for MA / DZ / AE (today 5 / 3 / 1 distinct pictures).
 
 ### Where the files live
 - [ ] **Q3.** Does Core save uploads through `django-storages`? Per deployment, which backend (Azure / S3 / GCS / NFS)
@@ -48,6 +50,11 @@ Tick a question off (and write the answer under it) once it is answered.
       variables. But the answer does decide whether `GcsFetcher` is used at all — if Core uses GCS **HMAC
       keys**, GCS speaks the S3 protocol and `S3Fetcher(endpoint_url="https://storage.googleapis.com")`
       reads it, so `GcsFetcher` (service-account JSON / machine service account) would be dead code.
+      **Partial answer (2026-10-11):** Azure = connection string; S3 = access key + secret key, region and
+      endpoint URL optional. Both already work through env vars. Still open: GCS, and how production passes them.
+- [ ] **N1.** The supervisor asked for the Azure connection string "as configuration". We read it from the env var
+      `AZURE_STORAGE_CONNECTION_STRING`, never from YAML, because it holds the account key (full access to the
+      account). Is an env var / Airflow connection fine, or must it be in the config file?
 - [ ] **Q7.** Are the image objects encrypted (cloud customer-provided key, or app-level encryption with the bundle's
       `transaction_data_apis_public_key`)? If so, which key decrypts them and can the pipeline use it?
 - [ ] **Q8.** `data` is Fernet-encrypted. Do we need anything from it? If yes, where is the Fernet key and may the
