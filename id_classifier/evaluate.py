@@ -32,7 +32,16 @@ from id_classifier.config import build_classifiers, build_detector, build_source
 from id_classifier.pipeline import ImageOutcome, process_image
 from id_classifier.routing import RoutingConfig
 from id_classifier.sources import read_image_file
-from id_classifier.types import GROUND_TRUTH_COLUMNS, NO_DOCUMENT, STATUS_MODEL_ERROR, STATUS_PARSE_ERROR, UNKNOWN, label_problems
+from id_classifier.types import (
+    GROUND_TRUTH_COLUMNS,
+    NO_DOCUMENT,
+    OUTCOME_CLASSIFIED,
+    OUTCOME_UNRECOGNISED,
+    STATUS_MODEL_ERROR,
+    STATUS_PARSE_ERROR,
+    UNKNOWN,
+    label_problems,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +50,10 @@ HIGHER_IS_BETTER = (
     "type_accuracy", "country_accuracy", "country_accuracy_macro", "side_accuracy",
     "negative_rejection_rate", "coverage", "accepted_accuracy",
 )
-LOWER_IS_BETTER = ("unknown_rate", "review_rate", "parse_error_rate", "model_error_rate", "latency_mean_ms")
-RATE_METRICS = HIGHER_IS_BETTER + ("unknown_rate", "review_rate", "parse_error_rate", "model_error_rate")  # averaged over repeats
+LOWER_IS_BETTER = ("unknown_rate", "unrecognised_rate", "accepted_wrong_country_rate", "review_rate",
+                   "parse_error_rate", "model_error_rate", "latency_mean_ms")
+RATE_METRICS = HIGHER_IS_BETTER + tuple(m for m in LOWER_IS_BETTER if m != "latency_mean_ms")  # averaged over repeats
+SMALL_CLASS_MAX = 10   # classes with fewer images than this get their own "indicative only" table in the report
 
 METRIC_HELP = {
     "type_accuracy": "documents only: predicted document_type == true type",
@@ -52,7 +63,9 @@ METRIC_HELP = {
     "negative_rejection_rate": "no-document images predicted as 'none' (or no region detected)",
     "coverage": "documents auto-accepted, i.e. NOT sent to review",
     "accepted_accuracy": "auto-accepted documents with all three labels correct (the quality of what skips review)",
-    "unknown_rate": "documents where the predicted country is 'unknown'",
+    "unknown_rate": "documents where the predicted country is 'unknown' (should be ~0: 'unknown' is reserved for no document)",
+    "unrecognised_rate": "documents the classifier recognised as no known class (sent to review with a best guess)",
+    "accepted_wrong_country_rate": "auto-accepted documents with the WRONG country (the costliest error: skips review)",
     "review_rate": "all images flagged needs_review",
     "parse_error_rate": "classifier answers that could not be parsed (share of all classifier calls)",
     "model_error_rate": "classifier calls that failed completely (share of all classifier calls)",
@@ -61,6 +74,7 @@ METRIC_HELP = {
 
 NO_DOC_LABEL = "NO_DOC"  # confusion-matrix label for "no document"
 ERROR_LABEL = "ERROR"    # confusion-matrix label when there is no prediction at all (failed fetch / parse error)
+UNRECOGNISED_LABEL = "UNRECOGNISED"  # confusion-matrix label for a document that matched no known class
 
 
 @dataclass
@@ -86,6 +100,8 @@ class SelectionRule:
     max_parse_error_rate: float = 0.02
     primary_metric: str = "country_accuracy_macro"  # highest wins...
     tie_breaker: str = "latency_mean_ms"            # ...on a tie, lowest wins
+    min_coverage: float | None = None               # optional: needed when primary_metric is accepted_accuracy,
+                                                    # which an over-cautious config could max out by reviewing everything
 
     @classmethod
     def from_dict(cls, values: dict | None) -> "SelectionRule":
@@ -97,11 +113,12 @@ class SelectionRule:
         return rule
 
     def describe(self) -> str:
+        coverage = f"coverage >= {self.min_coverage} and " if self.min_coverage is not None else ""
         return (
             f"negative_rejection_rate >= {self.min_negative_rejection_rate} and "
-            f"parse_error_rate <= {self.max_parse_error_rate}; then highest {self.primary_metric}; "
-            f"tie -> lowest {self.tie_breaker}"
-        )
+            f"parse_error_rate <= {self.max_parse_error_rate} and {coverage}"
+            f"then highest {self.primary_metric}; tie -> lowest {self.tie_breaker}"
+        ).replace(" and then", "; then")
 
 
 @dataclass
@@ -154,7 +171,13 @@ def _cm_pred(outcome: ImageOutcome) -> str:
     s = outcome.summary
     if s.document_type == NO_DOCUMENT:
         return NO_DOC_LABEL
+    if s.outcome == OUTCOME_UNRECOGNISED:
+        return UNRECOGNISED_LABEL
     return s.issuing_country or ERROR_LABEL
+
+
+def _class_of(document_type: str, country: str) -> str:
+    return f"{document_type}/{country}"   # side is not part of the "dataset" a document goes into
 
 
 def compute_metrics(truths: list[GroundTruth], outcomes: list[ImageOutcome]) -> dict:
@@ -178,6 +201,23 @@ def compute_metrics(truths: list[GroundTruth], outcomes: list[ImageOutcome]) -> 
         }
     country_scores = [v["country_accuracy"] for v in per_country.values()]
 
+    # Per document class (type + country): how each class fares, mainly to see the small classes.
+    per_class = {}
+    by_class = defaultdict(list)
+    for t, s in docs:
+        by_class[_class_of(t.document_type, t.issuing_country)].append((t, s))
+    for name, items in sorted(by_class.items()):
+        right = [s.outcome == OUTCOME_CLASSIFIED and (s.document_type, s.issuing_country) == (t.document_type, t.issuing_country)
+                 for t, s in items]
+        per_class[name] = {
+            "n": len(items),
+            "classified_correctly": sum(right),
+            "unrecognised": sum(s.outcome == OUTCOME_UNRECOGNISED for t, s in items),
+            "classified_as_other_class": sum(s.outcome == OUTCOME_CLASSIFIED and not r for (t, s), r in zip(items, right)),
+            "auto_accepted": sum(not s.needs_review for t, s in items),
+            "auto_accepted_correctly": sum(not s.needs_review and r for (t, s), r in zip(items, right)),
+        }
+
     return {
         "type_accuracy": _rate([s.document_type == t.document_type for t, s in docs]),
         "country_accuracy": _rate([s.issuing_country == t.issuing_country for t, s in docs]),
@@ -190,10 +230,13 @@ def compute_metrics(truths: list[GroundTruth], outcomes: list[ImageOutcome]) -> 
             for t, s in accepted
         ]),
         "unknown_rate": _rate([s.issuing_country == UNKNOWN for t, s in docs]),
+        "unrecognised_rate": _rate([s.outcome == OUTCOME_UNRECOGNISED for t, s in docs]),
+        "accepted_wrong_country_rate": _rate([s.issuing_country != t.issuing_country for t, s in accepted]),
         "review_rate": _rate([o.summary.needs_review for o in outcomes]),
         "parse_error_rate": _rate([p.status == STATUS_PARSE_ERROR for p in calls]),
         "model_error_rate": _rate([p.status == STATUS_MODEL_ERROR for p in calls]),
         "per_country": per_country,
+        "per_class": per_class,
         "confusion": Counter((_cm_true(t), _cm_pred(o)) for t, o in pairs),
         "latencies": [o.latency_ms for o in outcomes],
     }
@@ -219,6 +262,10 @@ def aggregate(name: str, repeats: list[dict]) -> dict:
             k: _mean_ignoring_none([row[k] for row in rows]) for k in ("type_accuracy", "country_accuracy", "side_accuracy")
         }}
     summary["per_country"] = per_country
+    summary["per_class"] = {
+        name: {k: _mean_ignoring_none([r["per_class"][name][k] for r in repeats]) for k in values}
+        for name, values in repeats[0]["per_class"].items()
+    }
     summary["confusion"] = sum((r["confusion"] for r in repeats), Counter())  # summed over all repeats
     return summary
 
@@ -234,6 +281,9 @@ def select_winner(summaries: list[dict], rule: SelectionRule) -> tuple[str | Non
         parse_errors = s["parse_error_rate"]
         if parse_errors is not None and parse_errors > rule.max_parse_error_rate:
             problems.append(f"parse_error_rate {parse_errors:.3f} > {rule.max_parse_error_rate}")
+        coverage = s["coverage"]
+        if rule.min_coverage is not None and (coverage is None or coverage < rule.min_coverage):
+            problems.append(f"coverage {_fmt(coverage)} < {rule.min_coverage}")
         notes[s["config"]] = "; ".join(problems) if problems else "passes"
         if not problems:
             candidates.append(s)
@@ -275,7 +325,7 @@ def _write_csv(path: Path, headers: list[str], rows: list[list]) -> None:
 
 def _confusion_labels(confusion: Counter) -> list[str]:
     labels = {label for pair in confusion for label in pair}
-    special = [l for l in (UNKNOWN, NO_DOC_LABEL, ERROR_LABEL) if l in labels]
+    special = [l for l in (UNKNOWN, UNRECOGNISED_LABEL, NO_DOC_LABEL, ERROR_LABEL) if l in labels]
     return sorted(labels - set(special)) + special  # countries A-Z, then the special labels at the end
 
 
@@ -286,7 +336,8 @@ def write_confusion(out_dir: Path, name: str, confusion: Counter) -> None:
     _write_csv(out_dir / f"confusion_{_slug(name)}.csv", headers, rows)
     (out_dir / f"confusion_{_slug(name)}.md").write_text(
         f"# Country confusion matrix: {name}\n\nRows = true country, columns = predicted. "
-        f"Summed over all repeats. {NO_DOC_LABEL} = no document, {ERROR_LABEL} = no prediction.\n\n"
+        f"Summed over all repeats. {NO_DOC_LABEL} = no document, {UNRECOGNISED_LABEL} = a document matching no known "
+        f"class (sent to review), {ERROR_LABEL} = no prediction.\n\n"
         + _md_table(headers, rows) + "\n",
         encoding="utf-8",
     )
@@ -330,12 +381,15 @@ def _new_run_dir(base: Path, experiment_name: str) -> Path:
 
 COMPARISON_COLUMNS = [
     "type_accuracy", "country_accuracy", "country_accuracy_macro", "side_accuracy", "negative_rejection_rate",
-    "coverage", "accepted_accuracy", "unknown_rate", "review_rate", "parse_error_rate", "model_error_rate",
+    "coverage", "accepted_accuracy", "accepted_wrong_country_rate", "unknown_rate", "unrecognised_rate", "review_rate",
+    "parse_error_rate", "model_error_rate",
 ]
+CLASS_COLUMNS = ["n", "classified_correctly", "unrecognised", "classified_as_other_class", "auto_accepted",
+                 "auto_accepted_correctly"]
 
 
 def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str | None, notes: dict,
-                  rule: SelectionRule, dataset_info: dict) -> None:
+                  rule: SelectionRule, dataset_info: dict, small_class_max: int = SMALL_CLASS_MAX) -> None:
     # No no-document images in the ground truth -> that metric cannot be measured: leave it out of the report.
     # (It is still computed, and checked by the selection rule, as soon as such images are added.)
     columns = [m for m in COMPARISON_COLUMNS
@@ -354,6 +408,11 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         for s in summaries for country, v in s["per_country"].items()
     ]
     _write_csv(out_dir / "per_country.csv", country_headers, country_rows)
+
+    class_headers = ["config", "class", *CLASS_COLUMNS]
+    class_rows = [[s["config"], cls, *[v[c] for c in CLASS_COLUMNS]] for s in summaries for cls, v in s["per_class"].items()]
+    _write_csv(out_dir / "per_class.csv", class_headers, class_rows)
+    small_rows = [row for row in class_rows if row[2] < small_class_max]
 
     parts = [
         f"# Experiment: {name}",
@@ -377,6 +436,15 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         "",
         _md_table(country_headers, country_rows),
         "",
+        f"## Small classes (fewer than {small_class_max} images): indicative only",
+        "",
+        "Too few images for a reliable rate, so counts are shown instead. Under leave-one-out a class with n images "
+        "has only n-1 references (front and back count separately): a class with 1 image can never be recognised.",
+        "",
+        _md_table(class_headers, small_rows) if small_rows else "_No small classes._",
+        "",
+        "All classes: `per_class.csv`.",
+        "",
         "## Metric definitions",
         "",
         *[f"- **{k}**: {v}" for k, v in METRIC_HELP.items() if k in columns or k not in COMPARISON_COLUMNS],
@@ -389,7 +457,7 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
 
 def write_predictions(out_dir: Path, name: str, rows: list[list]) -> None:
     headers = ["repeat", "transaction_id", "image_id", "true_type", "true_country", "true_side",
-               "pred_type", "pred_country", "pred_side", "confidence", "needs_review", "reasons", "latency_ms",
+               "pred_type", "pred_country", "pred_side", "outcome", "confidence", "needs_review", "reasons", "latency_ms",
                "classifier_outputs"]   # raw answer per classifier for the chosen region (labels/scores only)
     _write_csv(out_dir / f"predictions_{_slug(name)}.csv", headers, rows)
 
@@ -465,7 +533,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
                 s = o.summary
                 prediction_log.append([
                     repeat, t.transaction_id, t.image_id, t.document_type, t.issuing_country, t.document_side,
-                    s.document_type, s.issuing_country, s.document_side, s.confidence, s.needs_review,
+                    s.document_type, s.issuing_country, s.document_side, s.outcome, s.confidence, s.needs_review,
                     ",".join(s.reasons), round(o.latency_ms, 2),
                     json.dumps({p.model_name: p.raw_output for p in o.predictions.get(s.region_id, [])}),
                 ])
@@ -481,6 +549,7 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
         "negatives": len(truths) - documents, "fetch_failed": fetch_failed, "repeats": repeats,
         "routing": routing.describe(), "source": source_name,
     }
-    write_reports(out_dir, name, summaries, winner, notes, rule, dataset_info)
+    write_reports(out_dir, name, summaries, winner, notes, rule, dataset_info,
+                  int(config.get("small_class_max", SMALL_CLASS_MAX)))
     log.info("Results written to %s (winner: %s)", out_dir, winner)
     return ExperimentResult(out_dir, winner, summaries)

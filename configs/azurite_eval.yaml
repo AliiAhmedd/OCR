@@ -51,4 +51,4 @@ configurations:
         references: data/ground_truth.csv
         reference_detector: *yoloe
         k: 5
-        min_similarity: 0.72           # nearest reference less similar than this -> "unknown" -> review
+        min_similarity: 0.72           # nearest reference less similar than this -> "unrecognised" -> review
