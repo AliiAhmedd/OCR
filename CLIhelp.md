@@ -177,3 +177,4 @@ Writes `data/runs/<experiment>_<time>/`: `comparison.md` (read this first), `con
 | `configs/nfs_eval.yaml` | `evaluate` (images from the NFS share) |
 | `configs/minio_eval.yaml` | `evaluate`, images from MinIO (needs the emulators) |
 | `configs/azurite_eval.yaml` | `evaluate`, images from Azurite (needs the emulators) |
+

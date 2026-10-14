@@ -9,6 +9,8 @@ front_img, url, dict_of_paths, ...). We found three shapes, all pointing at a .z
 storage_key() turns every shape into one relative key, e.g. "tun_nid_ocr/x.zip". The same key is a path
 under the NFS root and an object name in an Azure / S3 / GCS bucket. Which leading folders to drop
 (the mount point, "media/", ...) is configuration: `strip_prefixes`.
+
+This is relevant and required for the pipeline to find the right zip in the NFS root or cloud storage.
 """
 
 from __future__ import annotations
