@@ -57,6 +57,10 @@ DOCUMENT_TYPES = {
     "mrz": "passport", "passport": "passport", "pp": "passport",
     "rp": "residence_permit", "residence": "residence_permit", "resident": "residence_permit",
     "residence_permit": "residence_permit", "rid": "residence_permit",
+    # The DocumentData drop spells it camelCase ("egy_residencePermit_front_img_1.jpg") and the token is
+    # lower-cased before the lookup, so the run-together spellings need their own entries.
+    "residencepermit": "residence_permit", "residentpermit": "residence_permit",
+    "residencypermit": "residence_permit", "residentid": "residence_permit",
     "dl": "driving_license", "license": "driving_license", "licence": "driving_license",
     "driver_license": "driving_license", "driving_license": "driving_license",
     "other": NO_DOCUMENT, "none": NO_DOCUMENT, "blank": NO_DOCUMENT,    # other = blank / no document

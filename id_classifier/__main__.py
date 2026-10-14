@@ -50,7 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = commands.add_parser("build-ground-truth", help="write ground_truth.csv from the labeled NFS folders")
     p.add_argument("--root", default="/mnt/nfs", help="NFS root as this machine sees it (default: /mnt/nfs)")
     p.add_argument("--out", default="data/ground_truth.csv", help="output CSV (default: data/ground_truth.csv)")
-    p.add_argument("--per-folder", type=int, help="at most this many DISTINCT pictures per folder (default: all)")
+    # 150 by default, not "all": the share holds 565 distinct Tunisian pictures against 1-5 for every other
+    # country, and that imbalance lets the k-vote be won by Tunisia on looks alone. 150 is also the cap the
+    # 161-image baseline used (progress.md rows 9 and 20), so runs stay comparable with it.
+    # Pass --per-folder 0 for no cap.
+    p.add_argument("--per-folder", type=int, default=150,
+                   help="at most this many DISTINCT pictures per folder (default: 150; 0 = all)")
     p.add_argument("--seed", type=int, default=42, help="same seed = same sample (default: 42)")
     p.set_defaults(func=cmd_build_ground_truth)
 

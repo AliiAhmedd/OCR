@@ -13,7 +13,11 @@ source:                          # where the images are read from (default: the 
   prefix: ""                     # objects sit at the bucket root (scripts/seed_emulators.py)
   region: us-east-1
   endpoint_url: http://127.0.0.1:9222
-  strip_prefixes: ["/mnt/nfs"]   # /mnt/nfs/<folder>/<file>.zip -> key <folder>/<file>.zip
+  # Both roots give the same key: /mnt/nfs/<folder>/<file>.zip -> <folder>/<file>.zip, and so does the
+  # local copy of the share (data/nfs_local, progress.md row 21: reading /mnt/nfs over the
+  # \\wsl.localhost UNC path costs 257 ms/zip). The longest matching prefix wins, so listing both lets
+  # one config run here and on the box where the share is mounted natively.
+  strip_prefixes: ["/mnt/nfs", "C:/Users/aliah/Downloads/OCR/data/nfs_local"]
   # credentials: never here. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment.
 repeats: 1                     # the pipeline is deterministic: every repeat gives the same result
 
