@@ -3,7 +3,7 @@
 #   python -m id_classifier evaluate --config configs/nfs_eval.yaml
 # Paths are relative to the folder you run the command from (the repo root).
 
-experiment_name: nfs_eval
+experiment_name: nfs_eval_k5
 ground_truth: data/ground_truth.csv
 output_dir: data/runs
 repeats: 1                     # the pipeline is deterministic: every repeat gives the same result
