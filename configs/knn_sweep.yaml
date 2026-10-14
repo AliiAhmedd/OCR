@@ -1,0 +1,72 @@
+# Sweep of the kNN decision rule on NFS ground truth + the hand-labeled DocumentData images.
+#   python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 150
+#   python -m id_classifier ingest-labeled-folder --folder /mnt/c/Users/<you>/Downloads/DocumentData \
+#       --merge-with data/ground_truth.csv
+#   python -m id_classifier evaluate --config configs/knn_sweep.yaml
+# Paths are relative to the folder you run the command from (the repo root).
+#
+# What is swept (see id_classifier/classifiers/knn.py, module docstring):
+#   min_similarity     floor: nearest reference below it -> "unrecognised" (review, best guess kept)
+#   nn_min_similarity  1-NN fallback: the nearest reference must be at least this similar ...
+#   nn_margin          ... and this much closer than the best reference of any OTHER document class
+# Every configuration reads the same reference embeddings (cached in data/cache after the first one).
+
+experiment_name: knn_sweep
+ground_truth: data/ground_truth_plus.csv
+output_dir: data/runs
+repeats: 1                     # deterministic pipeline
+small_class_max: 10            # classes with fewer images get their own "indicative only" table
+
+routing:
+  confidence_threshold: 0.8    # vote share (or nn_confidence for a 1-NN decision) below this -> review
+
+# Fixed BEFORE looking at the results. accepted_accuracy alone would reward sending everything to review,
+# so a configuration must also keep at least 70% of documents out of review (the baseline keeps ~78%).
+selection_rule:
+  min_negative_rejection_rate: 0.95   # checked once the ground truth has no-document images (DocumentData "other")
+  max_parse_error_rate: 0.02
+  min_coverage: 0.70
+  primary_metric: accepted_accuracy   # highest wins
+  tie_breaker: review_rate            # on a tie, the one that sends fewer images to review
+
+yoloe: &yoloe
+  type: yolo
+  name: yoloe26s
+  weights: yoloe-26s-seg.pt
+  prompts: ["id card", "card"]
+  confidence: 0.15
+  duplicate_iou: 0.7
+  image_size: 640
+  fallback_full_image: true
+
+knn: &knn
+  type: knn
+  name: dinov2_knn
+  model: facebook/dinov2-small
+  references: data/ground_truth_plus.csv
+  reference_detector: *yoloe
+  k: 5
+  min_similarity: 0.72
+  nn_trigger_share: 0.8
+  nn_confidence: 0.9           # >= routing threshold: a 1-NN decision is auto-accepted
+
+configurations:
+  # Baseline = Config A as before (no 1-NN fallback): the number to beat.
+  - name: A_baseline
+    detector: *yoloe
+    classifiers: [{<<: *knn}]
+
+  # 1-NN fallback: nn_min_similarity x nn_margin, floor 0.72
+  - {name: nn_s0.75_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.02}]}
+  - {name: nn_s0.75_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.05}]}
+  - {name: nn_s0.75_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.10}]}
+  - {name: nn_s0.80_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.02}]}
+  - {name: nn_s0.80_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
+  - {name: nn_s0.80_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.10}]}
+  - {name: nn_s0.85_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.02}]}
+  - {name: nn_s0.85_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.05}]}
+  - {name: nn_s0.85_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.10}]}
+
+  # Floor variants around the middle 1-NN setting: does a lower/higher "unrecognised" floor help?
+  - {name: nn_s0.80_m0.05_floor0.65, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.65, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
+  - {name: nn_s0.80_m0.05_floor0.78, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.78, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}

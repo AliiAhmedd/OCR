@@ -1,0 +1,76 @@
+# configs/knn_sweep.yaml with the images read from Azurite (Azure Blob emulator) instead of from disk.
+# Same 12 configurations, same ground truth, same selection rule: only the source differs, so the
+# results must match the MinIO run (configs/azurite_sweep.yaml) image for image.
+#   docker compose up -d
+#   $env:AZURE_STORAGE_CONNECTION_STRING="...see CLIhelp.md..."
+#   python -m id_classifier evaluate --config configs/azurite_sweep.yaml
+
+experiment_name: azurite_sweep
+ground_truth: data/ground_truth_plus.csv     # 576 NFS pictures + the 14 hand-labeled DocumentData images
+output_dir: data/runs
+repeats: 1                     # deterministic pipeline
+small_class_max: 10            # MA (5), DZ (3), AE, EG, IN, IQ, NG, SY land in the "indicative only" table
+
+source:
+  type: azure
+  container: ids
+  prefix: ""
+  credential_source: connection_string
+  # Three roots, all giving the key the objects were seeded under: the production mount, the local copy
+  # of the share (progress.md row 22) and the Downloads folder holding the DocumentData drop
+  # (-> DocumentData/<file>.jpg). The longest matching prefix wins.
+  strip_prefixes: ["/mnt/nfs", "C:/Users/aliah/Downloads/OCR/data/nfs_local", "C:/Users/aliah/Downloads"]
+  # credentials: never here. AZURE_STORAGE_CONNECTION_STRING in the environment.
+
+routing:
+  confidence_threshold: 0.8    # vote share (or nn_confidence for a 1-NN decision) below this -> review
+
+# Fixed BEFORE looking at the results, copied from configs/knn_sweep.yaml unchanged.
+selection_rule:
+  min_negative_rejection_rate: 0.95
+  max_parse_error_rate: 0.02
+  min_coverage: 0.70
+  primary_metric: accepted_accuracy   # highest wins
+  tie_breaker: review_rate            # on a tie, the one that sends fewer images to review
+
+yoloe: &yoloe
+  type: yolo
+  name: yoloe26s
+  weights: yoloe-26s-seg.pt
+  prompts: ["id card", "card"]
+  confidence: 0.15
+  duplicate_iou: 0.7
+  image_size: 640
+  fallback_full_image: true
+
+knn: &knn
+  type: knn
+  name: dinov2_knn
+  model: facebook/dinov2-small
+  references: data/ground_truth_plus.csv   # read from disk, embedded once, then cached
+  reference_detector: *yoloe
+  k: 5
+  min_similarity: 0.72
+  nn_trigger_share: 0.8
+  nn_confidence: 0.9           # >= routing threshold: a 1-NN decision is auto-accepted
+
+configurations:
+  # Baseline = Config A as before (no 1-NN fallback): the number to beat.
+  - name: A_baseline
+    detector: *yoloe
+    classifiers: [{<<: *knn}]
+
+  # 1-NN fallback: nn_min_similarity x nn_margin, floor 0.72
+  - {name: nn_s0.75_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.02}]}
+  - {name: nn_s0.75_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.05}]}
+  - {name: nn_s0.75_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.75, nn_margin: 0.10}]}
+  - {name: nn_s0.80_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.02}]}
+  - {name: nn_s0.80_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
+  - {name: nn_s0.80_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.10}]}
+  - {name: nn_s0.85_m0.02, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.02}]}
+  - {name: nn_s0.85_m0.05, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.05}]}
+  - {name: nn_s0.85_m0.10, detector: *yoloe, classifiers: [{<<: *knn, nn_fallback: true, nn_min_similarity: 0.85, nn_margin: 0.10}]}
+
+  # Floor variants around the middle 1-NN setting: does a lower/higher "unrecognised" floor help?
+  - {name: nn_s0.80_m0.05_floor0.65, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.65, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
+  - {name: nn_s0.80_m0.05_floor0.78, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.78, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}

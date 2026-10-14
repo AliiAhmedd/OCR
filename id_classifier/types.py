@@ -24,6 +24,12 @@ STATUS_OK = "ok"                    # the classifier returned a valid answer
 STATUS_PARSE_ERROR = "parse_error"  # the model answered, but not in the expected JSON / label set
 STATUS_MODEL_ERROR = "model_error"  # the model could not be called at all (crash, timeout, not installed)
 
+# --- Outcome of one image: exactly one of these. "unknown" labels are reserved for "no document". ---
+OUTCOME_CLASSIFIED = "classified"      # a document that matched a known class well enough
+OUTCOME_UNRECOGNISED = "unrecognised"  # a document is there, but it matches no known class well enough -> review
+OUTCOME_NO_DOCUMENT = "no_document"    # blank photo / nothing that looks like a document -> review
+OUTCOME_FETCH_FAILED = "fetch_failed"  # the image could not be loaded
+
 # Columns of a ground-truth CSV (written by ground_truth.py, read by the evaluation harness).
 GROUND_TRUTH_COLUMNS = ("transaction_id", "image_id", "image_path", "document_type", "issuing_country", "document_side")
 
@@ -95,6 +101,7 @@ class Prediction:
     model_version: str
     latency_ms: float
     error: str | None = None             # short error description when status != "ok"
+    outcome: str = OUTCOME_CLASSIFIED    # OUTCOME_UNRECOGNISED / OUTCOME_NO_DOCUMENT when the classifier says so
 
 
 @dataclass
@@ -110,3 +117,4 @@ class RoutedResult:
     confidence: float | None
     needs_review: bool
     reasons: list[str] = field(default_factory=list)  # why it needs review, e.g. ["low_confidence"]
+    outcome: str = OUTCOME_CLASSIFIED                 # classified / unrecognised / no_document / fetch_failed

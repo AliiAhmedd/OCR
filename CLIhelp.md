@@ -129,6 +129,29 @@ python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 150
 
 The labeled folders are listed in `FOLDER_LABELS` in `id_classifier/ground_truth.py`.
 
+## ingest-labeled-folder
+
+Turns a folder of hand-labeled images into ground-truth rows. The label is in the file name:
+`<country>_<docType>_<side>_img[_<n>].<ext>`, e.g. `egy_nid_front_img_2.jpg`.
+
+```bash
+python -m id_classifier ingest-labeled-folder --folder /mnt/c/Users/<you>/Downloads/DocumentData \
+    --merge-with data/ground_truth.csv          # -> data/document_data.csv + data/ground_truth_plus.csv
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--folder` | (required) | folder of labeled images (in WSL, Windows' Downloads is under `/mnt/c/Users/<you>/`) |
+| `--out` | `data/document_data.csv` | the new rows only |
+| `--merge-with` | none | existing ground truth(s) to merge with, e.g. `data/ground_truth.csv` |
+| `--merged-out` | `data/ground_truth_plus.csv` | merged CSV (what `configs/knn_sweep.yaml` reads) |
+
+Name tokens (`id_classifier/labeled_files.py`): countries `egy uae ind irq nig syr tun mar dza ...` (nig = Nigeria,
+NG); docTypes `nid` = national_id, `mrz`/`passport` = passport, `rp` = residence_permit, `dl` = driving_license,
+`other` = no document (blank photo / no card: labeled none / unknown / n/a). A UAE `nid` is filed as
+residence_permit/AE, the class of the NFS folder `UAE_RESIDENT_ID_OCR`. Front and back with the same country,
+docType and number are one card (one transaction id). Any name it cannot read stops the command with the full list.
+
 ## evaluate
 
 Runs every configuration (detector + classifiers) listed in an experiment YAML on the ground truth,
