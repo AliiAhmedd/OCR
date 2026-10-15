@@ -306,6 +306,32 @@ leave-one-out, so it always goes to review (reason `single_sample_class`) instea
 Applied by `evaluate`, `tune-routing` and the crop sheet. It uses the ground truth, so it is an evaluation rule, not
 something the live pipeline can do.
 
+## Embedding experiments (configs/embeddings/, run on a GPU machine)
+
+The kNN embedding is configurable (`id_classifier/classifiers/knn.py`, `_ImageEmbedder`):
+
+| kNN setting | Values | Meaning |
+| --- | --- | --- |
+| `model` | one id, or a list (fusion) | e.g. `facebook/dinov2-small` (default), `facebook/dinov2-base`, `facebook/dinov3-vitb16-pretrain-lvd1689m` (gated: accept the licence on Hugging Face, then `huggingface-cli login`), `google/siglip2-base-patch16-224` |
+| `model_weights` | list, one per model | fusion: each model's vector is normalised and weighted; cosine = weighted average of the per-model cosines |
+| `pooling` | `cls` (default) / `cls+mean` / `gem` | DINO models: CLS token, CLS + mean of patch tokens, or GeM (p=3) of patch tokens (register tokens skipped) |
+| `image_size` | `[width, height]` or none | e.g. `[448, 280]`: keep the card shape instead of the 224 square crop (multiples of 14 for DINOv2, 16 for DINOv3) |
+| `device` | `auto` (default) | cuda when available |
+
+`configs/embeddings/<variant>.yaml` = A_baseline / configuration 14 / configuration 15 with that embedding (Azurite);
+`<variant>_grid.yaml` = its threshold tune (1764 settings, TN >= 0.95 constraint). Variants: `dinov2_base`,
+`dinov2_small_clsmean`, `dinov2_small_gem`, `dinov2_small_448x280`, `dinov3_vits16plus`, `dinov3_vitb16`,
+`fusion_dinov2s_siglip2b_1to1`, `fusion_dinov2s_siglip2b_2to1`.
+
+```powershell
+.\scripts\run_embeddings.ps1                        # every variant: evaluate + tune, then the comparison table
+.\scripts\run_embeddings.ps1 dinov3_vitb16 dinov2_base  # only these
+.venv\Scripts\python.exe scripts\compare_embeddings.py  # the table again -> data/runs/embedding_comparison.md
+```
+
+Needs on that machine: the emulators up and seeded, `data/ground_truth_plus.csv`, a CUDA PyTorch. Caches are keyed
+on everything that changes the vector (the default DINOv2-small keeps its old key).
+
 ## Config files
 
 | File | Used by |

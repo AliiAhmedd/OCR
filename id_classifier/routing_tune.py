@@ -201,8 +201,10 @@ def load(experiment_path: str | Path):
     detector = build_detector(spec["detector"])
     knn_spec = spec["classifiers"][0]
     [knn] = build_classifiers([knn_spec], source)
+    # the default embedding keeps its old key (existing caches stay valid); any other variant adds its spec
+    embedding = knn_spec.get("model") if knn._embed.is_default() else knn._embed.spec
     cache = Path(knn_spec.get("cache_dir", "data/cache")) / "routing_queries_{}".format(_key(
-        Path(experiment["ground_truth"]).read_text(encoding="utf-8"), spec["detector"], knn_spec.get("model"),
+        Path(experiment["ground_truth"]).read_text(encoding="utf-8"), spec["detector"], embedding,
         getattr(source, "name", None), ROTATIONS))
     return experiment, truths, source, detector, knn, knn_spec, cache
 

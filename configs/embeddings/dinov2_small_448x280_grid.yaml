@@ -1,0 +1,41 @@
+# Threshold tune for DINOv2-small, 448x280 input (card shape kept, no square crop): configuration 14/15 settings re-searched on this embedding's similarity scale.
+#   python -m id_classifier tune-routing --grid configs/embeddings/dinov2_small_448x280_grid.yaml
+experiment: configs/embeddings/dinov2_small_448x280.yaml
+constraint:
+  min_majority_accepted_accuracy: 0.95
+fixed:
+  nn_fallback: true
+  nn_trigger_share: 0.8
+  nn_max_class_refs: 5
+  nn_side_check: true
+  query_rotations: portrait
+grid:
+  min_similarity:
+  - 0.45
+  - 0.5
+  - 0.55
+  - 0.6
+  - 0.65
+  - 0.7
+  - 0.75
+  nn_min_similarity:
+  - 0.5
+  - 0.55
+  - 0.6
+  - 0.65
+  - 0.7
+  - 0.75
+  - 0.8
+  nn_margin:
+  - 0.0
+  - 0.02
+  - 0.05
+  nn_big_class_min_similarity:
+  - 0.6
+  - 0.7
+  - 0.8
+  - 0.9
+  nn_side_vote_min_share:
+  - null
+  - 0.6
+  - 0.75

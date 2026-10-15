@@ -105,6 +105,10 @@ class EmbeddingKnnClassifier(Classifier):
         embedder: Callable[[Image.Image], np.ndarray] | None = None,   # tests pass a fake
         source=None,                              # the experiment's YAML `source:`: references are fetched from it
         query_rotations: str = "none",            # none | portrait | all: see rotations_for()
+        pooling: str = "cls",                     # cls | cls+mean | gem: see _ImageEmbedder
+        image_size: list[int] | None = None,      # [width, height], e.g. [448, 280]; None = the model's own
+        model_weights: list[float] | None = None, # model is a list of ids (fusion): one weight per model
+        device: str = "auto",                     # auto = cuda when available
     ):
         self.name = name
         self.k = k
@@ -122,7 +126,10 @@ class EmbeddingKnnClassifier(Classifier):
         rotations_for(1, 1, query_rotations)              # unknown mode -> error now, not on the first image
         self.query_rotations = query_rotations
         self.model_version = (
-            f"{model},k={k},min_sim={min_similarity}"
+            f"{'+'.join(model) if isinstance(model, list) else model},k={k},min_sim={min_similarity}"
+            + (f",pool={pooling}" if pooling != "cls" else "")
+            + (f",size={image_size[0]}x{image_size[1]}" if image_size else "")
+            + (f",weights={model_weights}" if model_weights else "")
             + (f",nn_sim={nn_min_similarity},nn_margin={nn_margin},nn_share={nn_trigger_share},nn_conf={nn_confidence}"
                if nn_fallback else "")
             + (f",nn_max_refs={nn_max_class_refs}" if nn_max_class_refs is not None else "")
@@ -130,7 +137,7 @@ class EmbeddingKnnClassifier(Classifier):
             + (",nn_side_check" if nn_side_check else "")
             + (f",side_vote_min={nn_side_vote_min_share}" if nn_side_vote_min_share is not None else "")
             + (f",rot={query_rotations}" if query_rotations != "none" else ""))
-        self._embed = embedder or _DinoEmbedder(model)
+        self._embed = embedder or _ImageEmbedder(model, pooling, image_size, model_weights, device)
         self.labels, self.vectors = self._load_references(references, reference_detector, model, cache_dir, source)
         self.class_refs = Counter(self.labels)            # references per label: big vs small classes
         log.info("kNN %s: %d reference crops", name, len(self.labels))
@@ -246,8 +253,10 @@ class EmbeddingKnnClassifier(Classifier):
         with Path(csv_path).open(encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         cache = None
-        if cache_dir is not None and isinstance(self._embed, _DinoEmbedder):
-            parts = [Path(csv_path).read_text(encoding="utf-8"), detector_spec, model]
+        if cache_dir is not None and isinstance(self._embed, _ImageEmbedder):
+            # the default embedding keeps its old key (existing caches stay valid); any other variant adds its spec
+            embedding = model if self._embed.is_default() else self._embed.spec
+            parts = [Path(csv_path).read_text(encoding="utf-8"), detector_spec, embedding]
             if source is not None:                            # own cache per storage: each run reads its own bytes
                 parts.append(getattr(source, "name", type(source).__name__))
             key = hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16]
@@ -295,19 +304,84 @@ def _normalize(vector: np.ndarray) -> np.ndarray:
     return vector / norm if norm else vector
 
 
-class _DinoEmbedder:
-    """DINOv2 image embedding: the CLS token of the last layer (one vector per image)."""
+POOLINGS = ("cls", "cls+mean", "gem")
 
-    def __init__(self, model: str):
+
+class _ImageEmbedder:
+    """Image embedding from one or more pretrained models (Hugging Face transformers).
+
+    model       one id, e.g. "facebook/dinov2-small" / "facebook/dinov3-vitb16-pretrain-lvd1689m", or a LIST of ids:
+                their normalised embeddings are weighted (weights) and joined, so the cosine of two joined vectors is
+                the weighted average of the per-model cosines (e.g. DINOv2 for layout + SigLIP 2 for printed text)
+    pooling     DINO-style models: "cls" (CLS token, as before), "cls+mean" (CLS and the mean of the patch tokens,
+                each normalised, joined) or "gem" (generalised mean of the patch tokens, p=3). Register tokens
+                (DINOv3, *-with-registers) are never counted as patches. SigLIP / CLIP models always use their own
+                pooled image embedding.
+    image_size  None = the model's own preprocessing (DINOv2: resize + 224 centre crop); [width, height] = resize to
+                exactly that, no crop, e.g. [448, 280] keeps an ID card's 1.59:1 shape (sides: multiples of the patch
+                size, 14 for DINOv2, 16 for DINOv3 / SigLIP 2)
+    device      "auto" = cuda when available, else cpu
+    """
+
+    def __init__(self, model, pooling: str = "cls", image_size=None, weights=None, device: str = "auto"):
         import torch                                           # heavy imports only when this classifier is used
         from transformers import AutoImageProcessor, AutoModel
 
+        if pooling not in POOLINGS:
+            raise ValueError(f"pooling {pooling!r} not in {POOLINGS}")
+        self.models = [model] if isinstance(model, str) else list(model)
+        self.weights = [float(w) for w in weights] if weights else [1.0] * len(self.models)
+        if len(self.weights) != len(self.models):
+            raise ValueError(f"model_weights {self.weights} must have one weight per model {self.models}")
+        self.pooling = pooling
+        self.image_size = [int(v) for v in image_size] if image_size else None
         self._torch = torch
-        self.processor = AutoImageProcessor.from_pretrained(model)
-        self.model = AutoModel.from_pretrained(model).eval()
+        if device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+        self.processors = [AutoImageProcessor.from_pretrained(name) for name in self.models]
+        self.nets = [AutoModel.from_pretrained(name).eval().to(device) for name in self.models]
+
+    @property
+    def spec(self) -> dict:
+        """Everything that changes the vector (part of the cache keys)."""
+        return {"models": self.models, "pooling": self.pooling, "image_size": self.image_size, "weights": self.weights}
+
+    def is_default(self) -> bool:
+        """One model, CLS, its own preprocessing: the embedding every run before 2026-10-15 used."""
+        return len(self.models) == 1 and self.pooling == "cls" and self.image_size is None
+
+    def _pixels(self, processor, image: Image.Image) -> dict:
+        kwargs = {}
+        if self.image_size:
+            width, height = self.image_size
+            kwargs = {"size": {"height": height, "width": width}, "do_center_crop": False}
+        inputs = processor(images=image.convert("RGB"), return_tensors="pt", **kwargs)
+        return {k: v.to(self.device) for k, v in inputs.items()}
+
+    def _one(self, net, processor, image: Image.Image) -> np.ndarray:
+        torch = self._torch
+        inputs = self._pixels(processor, image)
+        with torch.no_grad():
+            if hasattr(net, "get_image_features"):              # SigLIP / CLIP: the model's pooled image embedding
+                features = net.get_image_features(**inputs)
+                features = getattr(features, "pooler_output", features)
+                return features[0].float().cpu().numpy()
+            tokens = net(**inputs).last_hidden_state[0].float()  # [CLS, registers..., patches...]
+        registers = int(getattr(net.config, "num_register_tokens", 0) or 0)
+        cls, patches = tokens[0], tokens[1 + registers:]
+        if self.pooling == "cls":
+            vector = cls
+        elif self.pooling == "cls+mean":
+            mean = patches.mean(0)
+            vector = torch.cat([cls / cls.norm(), mean / mean.norm()])
+        else:                                                   # gem, p = 3, on the (clamped) patch activations
+            vector = patches.clamp(min=1e-6).pow(3).mean(0).pow(1 / 3)
+        return vector.cpu().numpy()
 
     def __call__(self, image: Image.Image) -> np.ndarray:
-        inputs = self.processor(images=image.convert("RGB"), return_tensors="pt")
-        with self._torch.no_grad():
-            output = self.model(**inputs)
-        return output.last_hidden_state[0, 0].numpy()
+        if len(self.nets) == 1:
+            return self._one(self.nets[0], self.processors[0], image)
+        parts = [np.sqrt(w) * _normalize(self._one(net, proc, image))   # sqrt(w): cosine = weighted average
+                 for net, proc, w in zip(self.nets, self.processors, self.weights)]
+        return np.concatenate(parts) / np.sqrt(sum(self.weights))

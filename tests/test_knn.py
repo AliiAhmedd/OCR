@@ -221,3 +221,14 @@ def test_side_mismatch_accepts_the_vote_when_the_side_vote_agrees_strongly_enoug
     assert knn.decide(front_wins, None)["decision"] == "vote (1nn side mismatch)"
     knn.nn_side_vote_min_share = None                                            # off: as configuration 14
     assert knn.decide(front_wins, None)["decision"] == "vote (1nn side mismatch)"
+
+
+def test_embedding_settings_are_part_of_the_model_version(tmp_path, monkeypatch):
+    """pooling / image_size / model list (fusion) change the vector, so they must be visible in model_version."""
+    knn = make_knn(tmp_path, monkeypatch, [(TN_F, unit(0)), (DZ_F, unit(40, 2))],
+                   model=["facebook/dinov2-small", "google/siglip2-base-patch16-224"], model_weights=[2, 1],
+                   pooling="gem", image_size=[448, 280])
+    assert knn.model_version.startswith("facebook/dinov2-small+google/siglip2-base-patch16-224,")
+    assert ",pool=gem" in knn.model_version and ",size=448x280" in knn.model_version and ",weights=[2, 1]" in knn.model_version
+    default = make_knn(tmp_path / "d", monkeypatch, [(TN_F, unit(0)), (DZ_F, unit(40, 2))])
+    assert "pool=" not in default.model_version and "size=" not in default.model_version

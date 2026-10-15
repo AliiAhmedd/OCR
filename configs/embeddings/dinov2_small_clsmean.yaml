@@ -1,0 +1,96 @@
+# Embedding experiment: DINOv2-small, CLS + mean of patch tokens.
+# A_baseline / configuration 14 / configuration 15 with this embedding; every image and kNN reference
+# from Azurite. Thresholds are the DINOv2-small ones: retune with the matching _grid.yaml before judging.
+#   python -m id_classifier evaluate --config configs/embeddings/dinov2_small_clsmean.yaml
+#   python -m id_classifier tune-routing --grid configs/embeddings/dinov2_small_clsmean_grid.yaml
+# Generated (one file per embedding, same structure); progress.md row 44.
+experiment_name: embed_dinov2_small_clsmean
+ground_truth: data/ground_truth_plus.csv
+output_dir: data/runs
+repeats: 1
+small_class_max: 10
+review_single_sample_classes: true
+source:
+  type: azure
+  container: ids
+  prefix: ''
+  credential_source: connection_string
+  strip_prefixes:
+  - /mnt/nfs
+  - //wsl.localhost/Ubuntu/mnt/nfs
+  - C:/Users/aliah/Downloads/OCR/data/nfs_local
+  - C:/Users/aliah/Downloads
+  - C:/Users/LENOVO/Downloads
+routing:
+  confidence_threshold: 0.8
+selection_rule:
+  min_negative_rejection_rate: 0.95
+  max_parse_error_rate: 0.02
+  min_coverage: 0.7
+  primary_metric: accepted_accuracy
+  tie_breaker: review_rate
+configurations:
+- name: A_baseline
+  detector: &id001
+    type: yolo
+    name: yoloe26s
+    weights: yoloe-26s-seg.pt
+    prompts:
+    - id card
+    - card
+    confidence: 0.15
+    duplicate_iou: 0.7
+    image_size: 640
+    fallback_full_image: true
+  classifiers:
+  - type: knn
+    name: dinov2_knn
+    references: data/ground_truth_plus.csv
+    reference_detector: *id001
+    k: 5
+    min_similarity: 0.72
+    nn_trigger_share: 0.8
+    nn_confidence: 0.9
+    model: facebook/dinov2-small
+    pooling: cls+mean
+- name: configuration_14
+  detector: *id001
+  classifiers:
+  - type: knn
+    name: dinov2_knn
+    references: data/ground_truth_plus.csv
+    reference_detector: *id001
+    k: 5
+    min_similarity: 0.55
+    nn_trigger_share: 0.8
+    nn_confidence: 0.9
+    model: facebook/dinov2-small
+    pooling: cls+mean
+    nn_fallback: true
+    nn_min_similarity: 0.6
+    nn_margin: 0.05
+    query_rotations: portrait
+    nn_max_class_refs: 5
+    nn_big_class_min_similarity: 0.7
+    nn_side_check: true
+- name: configuration_15
+  detector: *id001
+  classifiers:
+  - type: knn
+    name: dinov2_knn
+    references: data/ground_truth_plus.csv
+    reference_detector: *id001
+    k: 5
+    min_similarity: 0.55
+    nn_trigger_share: 0.8
+    nn_confidence: 0.9
+    model: facebook/dinov2-small
+    pooling: cls+mean
+    nn_fallback: true
+    nn_min_similarity: 0.6
+    nn_margin: 0.05
+    query_rotations: portrait
+    nn_max_class_refs: 5
+    nn_big_class_min_similarity: 0.7
+    nn_side_check: true
+    nn_side_vote_min_share: 0.75
