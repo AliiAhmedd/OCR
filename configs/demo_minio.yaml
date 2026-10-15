@@ -1,0 +1,72 @@
+# Demo: the chosen configuration (configuration 14), every image and every kNN reference read from MinIO
+# (S3 emulator). Same experiment as configs/demo_azurite.yaml: only the storage differs, so both runs must
+# give the same results image for image.
+#   docker compose up -d
+#   export AWS_ACCESS_KEY_ID=rootuser AWS_SECRET_ACCESS_KEY=rootpass123
+#   python -m id_classifier evaluate --config configs/demo_minio.yaml
+
+experiment_name: demo_minio
+ground_truth: data/ground_truth_plus.csv   # NFS pictures (TN capped at 150) + the hand-labeled DocumentData images
+output_dir: data/runs
+repeats: 1                                 # the pipeline is deterministic
+small_class_max: 10                        # classes with fewer images: "indicative only" table
+# Evaluation rule (uses the ground truth): a document whose class (type/country/side) has ONE image has no reference
+# of its own class under leave-one-out, so it always goes to human review (reason single_sample_class).
+review_single_sample_classes: true
+
+source:
+  type: s3
+  bucket: ids
+  prefix: ""
+  region: us-east-1
+  endpoint_url: http://127.0.0.1:9222      # MinIO (docker-compose.yml)
+  # credentials: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment, never in this file
+  # Prefixes removed from image_path to get the storage key (<folder>/<file>); the longest match wins.
+  # /mnt/nfs = the share in WSL / Linux; //wsl.localhost/Ubuntu/mnt/nfs = the same share seen from Windows;
+  # the Downloads folders hold the DocumentData drop (-> DocumentData/<file>.jpg) on the two dev machines.
+  strip_prefixes: ["/mnt/nfs", "//wsl.localhost/Ubuntu/mnt/nfs", "C:/Users/aliah/Downloads/OCR/data/nfs_local",
+                   "C:/Users/aliah/Downloads", "C:/Users/LENOVO/Downloads"]
+
+routing:
+  confidence_threshold: 0.8                # confidence below this -> human review
+
+# Fixed before the runs.
+selection_rule:
+  min_negative_rejection_rate: 0.95
+  max_parse_error_rate: 0.02
+  min_coverage: 0.70
+  primary_metric: accepted_accuracy        # highest wins
+  tie_breaker: review_rate                 # on a tie, the one that sends fewer images to review
+
+# Detector: YOLOE-26 (open vocabulary) finds the document and crops it; no box -> the whole image.
+yoloe: &yoloe
+  type: yolo
+  name: yoloe26s
+  weights: yoloe-26s-seg.pt
+  prompts: ["id card", "card"]
+  confidence: 0.15
+  duplicate_iou: 0.7
+  image_size: 640
+  fallback_full_image: true
+
+# Classifier: DINOv2 embedding of the crop -> nearest labeled references (also fetched from the bucket).
+knn: &knn
+  type: knn
+  name: dinov2_knn
+  model: facebook/dinov2-small
+  references: data/ground_truth_plus.csv
+  reference_detector: *yoloe
+  k: 5
+  min_similarity: 0.72
+  nn_trigger_share: 0.8
+  nn_confidence: 0.9
+
+configurations:
+  # Chosen (progress.md rows 36-39): the 1-NN fallback decides small classes (<= 5 references) from similarity
+  # 0.60; the big class (TN) only from 0.70 and only when its nearest reference's side agrees with the side its
+  # TN neighbours vote (front/back check). Portrait crops are also compared turned 90 / 270 degrees.
+  - name: nn_side_check_f0.55_s0.60_big0.70
+    detector: *yoloe
+    classifiers:
+      - {<<: *knn, min_similarity: 0.55, nn_fallback: true, nn_min_similarity: 0.60, nn_margin: 0.05,
+         query_rotations: portrait, nn_max_class_refs: 5, nn_big_class_min_similarity: 0.70, nn_side_check: true}

@@ -11,6 +11,7 @@ Classes are listed as "module:ClassName" strings and imported only when used, so
 from __future__ import annotations
 
 import importlib
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,18 @@ import yaml
 
 REGISTRY = {
     "detector": {
-        "yolo": "id_classifier.detectors:YoloDetector",          # needs the [yolo] extra (ultralytics)
+        "yolo": "id_classifier.detectors:YoloDetector",          # needs the [models] extra (ultralytics)
     },
     "classifier": {
-        "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [embeddings] extra
+        "knn": "id_classifier.classifiers.knn:EmbeddingKnnClassifier",   # needs the [models] extra (torch, transformers)
+    },
+    # Where the images are read from. Settings (bucket, prefix, endpoint, strip_prefixes) go in YAML;
+    # credentials never do: each SDK reads them from the environment (see fetchers.py).
+    "source": {
+        "nfs": "id_classifier.sources:NfsZipSource",       # files on disk / the NFS share (the default)
+        "s3": "id_classifier.fetchers:s3_source",          # needs the [s3] extra
+        "azure": "id_classifier.fetchers:azure_source",    # needs the [azure] extra
+        "gcs": "id_classifier.fetchers:gcs_source",        # needs the [gcs] extra
     },
 }
 
@@ -32,7 +41,7 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def build(kind: str, spec: dict) -> Any:
-    """Creates one component (kind = "detector" | "classifier") from its YAML dict."""
+    """Creates one component (kind = "detector" | "classifier" | "source") from its YAML dict."""
     settings = dict(spec)                     # copy, so the caller's dict is not changed
     type_name = settings.pop("type", None)
     options = REGISTRY[kind]
@@ -49,11 +58,29 @@ def build_detector(spec: dict):
     return build("detector", spec)
 
 
-def build_classifiers(specs: list[dict]) -> list:
+def build_classifiers(specs: list[dict], source=None) -> list:
+    """source: the experiment's image source. A classifier that reads reference images (kNN) gets it, so its
+    references come from the same storage as the images it classifies."""
     if not specs:
         raise ValueError("At least one classifier is needed")
-    classifiers = [build("classifier", s) for s in specs]
+    classifiers = [build("classifier", {**s, "source": source} if source is not None and _takes_source(s) else s)
+                   for s in specs]
     names = [c.name for c in classifiers]
     if len(set(names)) != len(names):         # names are stored per prediction, so they must be unique
         raise ValueError(f"Classifier names must be unique within one configuration, got {names}")
     return classifiers
+
+
+def _takes_source(spec: dict) -> bool:
+    """True when the classifier class of `spec` has a `source` parameter (it reads reference images)."""
+    options = REGISTRY["classifier"]
+    if spec.get("type") not in options:
+        return False                          # build() raises the "Unknown classifier type" error
+    module_name, class_name = options[spec["type"]].split(":")
+    cls = getattr(importlib.import_module(module_name), class_name)
+    return "source" in inspect.signature(cls).parameters
+
+
+def build_source(spec: dict | None):
+    """The image source of an experiment, or None when the YAML has no `source:` (= read files from disk)."""
+    return build("source", spec) if spec else None

@@ -1,7 +1,10 @@
 """Command line: python -m id_classifier <command> ...
 
-    build-ground-truth   write ground_truth.csv from the labeled NFS folders (distinct pictures only)
-    evaluate             detect + classify + route every ground-truth image and write the results report
+    build-ground-truth     write ground_truth.csv from the labeled NFS folders (distinct pictures only)
+    ingest-labeled-folder  write a ground-truth CSV from hand-labeled files (<country>_<docType>_<side>_img[_n])
+                           and optionally merge it with another ground truth
+    find-duplicates        report the byte-identical re-uploads in the NFS folders (evidence for the de-duplication)
+    evaluate               fetch + detect + classify + route every ground-truth image and write the results report
 
 See README.md for the full walk-through.
 """
@@ -13,12 +16,32 @@ import logging
 import sys
 
 from id_classifier.evaluate import run_experiment
-from id_classifier.ground_truth import build_ground_truth
+from id_classifier.ground_truth import FOLDER_LABELS, build_ground_truth
+from id_classifier.labeled_files import ground_truth_rows, merge_ground_truths, read_labeled_folder, summarize, write_rows
 
 
 def cmd_build_ground_truth(args: argparse.Namespace) -> int:
     csv_path = build_ground_truth(args.root, args.out, per_folder=args.per_folder, seed=args.seed)
     print(f"Wrote {csv_path}")
+    return 0
+
+
+def cmd_ingest_labeled_folder(args: argparse.Namespace) -> int:
+    files = read_labeled_folder(args.folder)
+    print(summarize(files))
+    csv_path = write_rows(args.out, ground_truth_rows(files))
+    print(f"Wrote {csv_path}")
+    if args.merge_with:
+        merged = merge_ground_truths([*args.merge_with, csv_path], args.merged_out)
+        print(f"Wrote {merged} (= {' + '.join(map(str, [*args.merge_with, csv_path]))})")
+    return 0
+
+
+def cmd_find_duplicates(args: argparse.Namespace) -> int:
+    from id_classifier.duplicates import find_duplicates
+
+    summary, groups = find_duplicates(args.root, args.folders or list(FOLDER_LABELS), args.out)
+    print(f"Wrote {summary} and {groups}")
     return 0
 
 
@@ -36,12 +59,29 @@ def build_parser() -> argparse.ArgumentParser:
     p = commands.add_parser("build-ground-truth", help="write ground_truth.csv from the labeled NFS folders")
     p.add_argument("--root", default="/mnt/nfs", help="NFS root as this machine sees it (default: /mnt/nfs)")
     p.add_argument("--out", default="data/ground_truth.csv", help="output CSV (default: data/ground_truth.csv)")
-    p.add_argument("--per-folder", type=int, help="at most this many DISTINCT pictures per folder (default: all)")
+    # 150 by default, not "all": the share holds 565 distinct Tunisian pictures against 1-5 for every other
+    # country, and that imbalance lets the k-vote be won by Tunisia on looks alone. Pass --per-folder 0 for no cap.
+    p.add_argument("--per-folder", type=int, default=150,
+                   help="at most this many DISTINCT pictures per folder (default: 150; 0 = all)")
     p.add_argument("--seed", type=int, default=42, help="same seed = same sample (default: 42)")
     p.set_defaults(func=cmd_build_ground_truth)
 
+    p = commands.add_parser("ingest-labeled-folder", help="ground truth from hand-labeled image file names")
+    p.add_argument("--folder", required=True, help="folder of <country>_<docType>_<side>_img[_n].<ext> images")
+    p.add_argument("--out", default="data/document_data.csv", help="output CSV (default: data/document_data.csv)")
+    p.add_argument("--merge-with", nargs="+", help="ground-truth CSV(s) to merge the new rows into, e.g. data/ground_truth.csv")
+    p.add_argument("--merged-out", default="data/ground_truth_plus.csv",
+                   help="merged CSV (default: data/ground_truth_plus.csv)")
+    p.set_defaults(func=cmd_ingest_labeled_folder)
+
+    p = commands.add_parser("find-duplicates", help="report byte-identical re-uploads in the NFS folders")
+    p.add_argument("--root", default="/mnt/nfs", help="NFS root as this machine sees it (default: /mnt/nfs)")
+    p.add_argument("--folders", nargs="+", help="NFS folders to check (default: the labeled folders)")
+    p.add_argument("--out", default="data/duplicates", help="output folder (default: data/duplicates)")
+    p.set_defaults(func=cmd_find_duplicates)
+
     p = commands.add_parser("evaluate", help="run the configuration(s) of an experiment YAML and write the report")
-    p.add_argument("--config", required=True, help="experiment YAML, e.g. configs/nfs_eval.yaml")
+    p.add_argument("--config", required=True, help="experiment YAML, e.g. configs/demo_azurite.yaml")
     p.set_defaults(func=cmd_evaluate)
     return parser
 
