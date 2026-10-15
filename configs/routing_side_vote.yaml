@@ -1,0 +1,22 @@
+# Side-vote accept (progress.md row 41): when the side check blocks a TN 1-NN (nearest reference has the other side)
+# but the k-vote already says the side its TN neighbours vote, accept the k-vote if that side vote is at least
+# nn_side_vote_min_share one-sided. Configuration 14 otherwise; same Azurite images + stored embeddings.
+#   python -m id_classifier tune-routing --grid configs/routing_side_vote.yaml
+experiment: configs/azurite_sweep.yaml
+
+constraint:
+  min_majority_accepted_accuracy: 0.95
+
+fixed:                                   # configuration 14
+  nn_fallback: true
+  min_similarity: 0.55
+  nn_min_similarity: 0.60
+  nn_margin: 0.05
+  nn_trigger_share: 0.8
+  query_rotations: portrait
+  nn_max_class_refs: 5
+  nn_side_check: true
+
+grid:                                    # 3 x 11 = 33 settings
+  nn_big_class_min_similarity: [0.70, 0.75, 0.80]
+  nn_side_vote_min_share: [null, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 1.00]   # null = configuration 14

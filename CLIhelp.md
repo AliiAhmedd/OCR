@@ -261,13 +261,16 @@ python -m id_classifier tune-routing --grid configs/routing_grid.yaml --check-ru
 
 The embedding pass stores every region in 4 turns (0/90/180/270), so `query_rotations` can be tuned too:
 `none` (as before), `portrait` (a crop taller than wide is also compared turned 90 and 270; the best match per
-reference counts) or `all` (every crop in all 4 turns). The same setting exists on the kNN in experiment YAMLs.
+reference counts), `portrait_box` (as portrait, but only when YOLOE found a box: the whole-photo fallback stays one
+view; tested worse, progress.md row 40) or `all` (every crop in all 4 turns). The same setting exists on the kNN in experiment YAMLs.
 
 `nn_max_class_refs` (kNN setting, tunable): the 1-NN fallback may only decide when the nearest reference's label has
 at most this many references; a bigger class (TN) keeps the k-vote, unless `nn_big_class_min_similarity` is set:
 then a big class may use 1-NN too, but only from that (stricter) similarity on. `nn_side_check: true` adds a
 front/back check to that big-class 1-NN: the nearest reference's side must agree with the side the k neighbours of
-the same type + country vote, else the k-vote stands. A grid file may add
+the same type + country vote, else the k-vote stands. `nn_side_vote_min_share` (with the side check): when the
+1-NN is blocked but the k-vote already says the side-vote side and that vote is at least this one-sided, the k-vote
+is accepted (`vote (side vote agrees)`; `configs/routing_side_vote.yaml`). A grid file may add
 `constraint: {min_majority_accepted_accuracy: 0.95}`: results.md then gets a "Constrained best" section (biggest
 country's accepted accuracy at least that, 0 wrong-country, ranked by correct non-TN accepts) and the
 `majority_accepted_accuracy` column.
@@ -290,6 +293,10 @@ python scripts/inspect_crops.py --experiment configs/azurite_sweep.yaml --config
 ```
 
 The sheet lists the classes with 2+ images first (these should be recognised), then the single-sample classes.
+`--only-1nn-failures` instead shows every image (any country) where the 1-NN fallback was tried and the result
+failed (review, or a wrong auto-accept), with the kNN's decision, vote share, margin, side vote and the turn that
+matched (plus the crop turned that way). Example:
+`python scripts/inspect_crops.py --configuration nn_side_check_f0.55_s0.60_big0.70 --only-1nn-failures`.
 
 ### Evaluation rule: single-sample classes go to review
 

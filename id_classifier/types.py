@@ -51,6 +51,11 @@ def label_problems(document_type: str | None, issuing_country: str | None, docum
     return problems
 
 
+# Set on a crop (PIL Image.info) when it is the detector's whole-image fallback (no card box found), so a
+# classifier can tell a real card crop from a whole photo (knn query_rotations "portrait_box").
+WHOLE_IMAGE_INFO = "whole_image_fallback"
+
+
 def make_region_id(transaction_id: int, image_id: str, detector_name: str, index: int | str) -> str:
     """Region ids look like '1576404:front:yoloe26s:0'. The detector name is part of the id,
     so regions from two different detectors never collide in the database."""

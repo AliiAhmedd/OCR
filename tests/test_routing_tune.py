@@ -121,3 +121,45 @@ def test_single_sample_rule_sends_one_image_classes_to_review():
     assert not eg.needs_review                                          # EG: two images -> routed as before
     assert not blank.needs_review                                       # no document: not a class
     review_single_sample(truths[0], accepted(), None)                   # rule off: nothing changes
+
+
+def test_portrait_box_turns_only_a_real_card_box():
+    assert rotations_for(5, 8, "portrait_box") == (0, 90, 270)                     # portrait card box: turned
+    assert rotations_for(5, 8, "portrait_box", whole_image=True) == (0,)           # whole portrait photo: as is
+    assert rotations_for(8, 5, "portrait_box") == (0,)                             # landscape: as is
+    assert rotations_for(5, 8, "portrait", whole_image=True) == (0, 90, 270)       # old mode: unchanged
+
+
+class WholeImageDetector(FixedDetector):
+    """Like YoloDetector finding no box: one region, id ':full', the crop tagged as the whole image."""
+
+    def detect(self, record):
+        from id_classifier.detectors import FULL_IMAGE_INDEX
+        from id_classifier.types import WHOLE_IMAGE_INFO, Region, make_region_id
+
+        record.image.info[WHOLE_IMAGE_INFO] = True
+        box = (0, 0, *record.image.size)
+        return [Region(make_region_id(record.transaction_id, record.image_id, self.name, FULL_IMAGE_INDEX),
+                       record.transaction_id, record.image_id, box, 0.0, self.name, crop=record.image)]
+
+
+@pytest.mark.parametrize("mode", ["none", "portrait", "portrait_box", "all"])
+@pytest.mark.parametrize("detector", [FixedDetector(), WholeImageDetector()])        # card box / no box found
+def test_portrait_box_routes_like_the_pipeline(tmp_path, monkeypatch, mode, detector):
+    knn = make_knn(tmp_path, monkeypatch, [(TN_F, unit(0)), (TN_F, unit(5)), (TN_B, unit(10)), (DZ_F, unit(30, 2))],
+                   nn_fallback=True)
+    pattern_embedder(knn)
+    knn.query_rotations = mode
+    routing = RoutingConfig()
+    expected, images = [], []
+    for i, size in enumerate([(8, 5), (5, 8), (6, 9)]):
+        record = query_record(i, size)
+        regions = detector.detect(record)
+        views = [np.stack([knn.embed(r.crop.rotate(a, expand=True) if a else r.crop) for a in ROTATIONS])
+                 for r in regions]
+        expected.append(process_image(record, detector, [knn], routing).summary)
+        record.image = None
+        images.append(StoredImage(record, regions, views))
+    got = route_all(images, knn, routing, detector.name)
+    fields = lambda s: (s.document_type, s.issuing_country, s.document_side, s.confidence, s.needs_review, s.reasons)
+    assert [fields(s) for s in got] == [fields(s) for s in expected]

@@ -50,6 +50,7 @@ from id_classifier.types import (
     OUTCOME_UNRECOGNISED,
     STATUS_OK,
     UNKNOWN,
+    WHOLE_IMAGE_INFO,
     Prediction,
 )
 
@@ -58,21 +59,25 @@ log = logging.getLogger(__name__)
 Label = tuple[str, str, str]   # (document_type, issuing_country, document_side)
 
 ROTATIONS = (0, 90, 180, 270)  # degrees, counter-clockwise: the views a query crop can be embedded in
-QUERY_ROTATION_MODES = ("none", "portrait", "all")
+QUERY_ROTATION_MODES = ("none", "portrait", "portrait_box", "all")
 
 
-def rotations_for(width: int, height: int, mode: str) -> tuple[int, ...]:
+def rotations_for(width: int, height: int, mode: str, whole_image: bool = False) -> tuple[int, ...]:
     """Which turns of a query crop are compared with the references (the best match per reference counts).
     DINOv2 is not rotation invariant: a card photographed sideways lands next to other sideways cards.
       none:     the crop as it is (0)
       portrait: a crop taller than wide is also tried turned 90 and 270 (cards are landscape; 0 is kept, so an
                 upright portrait passport page still matches as it is); a landscape crop stays one view
+      portrait_box: as portrait, but only for a real card box: the detector's whole-image fallback (no box found,
+                whole_image=True) stays one view, since a portrait phone photo is not a sideways card
       all:      0, 90, 180, 270 for every crop (also catches upside-down cards; 4x the embedding time)"""
     if mode not in QUERY_ROTATION_MODES:
         raise ValueError(f"query_rotations {mode!r} not in {QUERY_ROTATION_MODES}")
     if mode == "all":
         return ROTATIONS
     if mode == "portrait" and height > width:
+        return (0, 90, 270)
+    if mode == "portrait_box" and height > width and not whole_image:
         return (0, 90, 270)
     return (0,)
 
@@ -95,6 +100,7 @@ class EmbeddingKnnClassifier(Classifier):
         nn_max_class_refs: int | None = None,     # 1-NN only for a nearest label with at most this many references
         nn_big_class_min_similarity: float | None = None,  # ...or, for a bigger class, only from this similarity on
         nn_side_check: bool = False,              # big class: 1-NN only if its class's neighbours vote the same side
+        nn_side_vote_min_share: float | None = None,   # side mismatch: accept the k-vote if the side vote agrees this strongly
         cache_dir: str | None = "data/cache",     # reference embeddings are saved here (None = no cache)
         embedder: Callable[[Image.Image], np.ndarray] | None = None,   # tests pass a fake
         source=None,                              # the experiment's YAML `source:`: references are fetched from it
@@ -112,6 +118,7 @@ class EmbeddingKnnClassifier(Classifier):
         self.nn_max_class_refs = nn_max_class_refs
         self.nn_big_class_min_similarity = nn_big_class_min_similarity
         self.nn_side_check = nn_side_check
+        self.nn_side_vote_min_share = nn_side_vote_min_share
         rotations_for(1, 1, query_rotations)              # unknown mode -> error now, not on the first image
         self.query_rotations = query_rotations
         self.model_version = (
@@ -121,6 +128,7 @@ class EmbeddingKnnClassifier(Classifier):
             + (f",nn_max_refs={nn_max_class_refs}" if nn_max_class_refs is not None else "")
             + (f",nn_big_sim={nn_big_class_min_similarity}" if nn_big_class_min_similarity is not None else "")
             + (",nn_side_check" if nn_side_check else "")
+            + (f",side_vote_min={nn_side_vote_min_share}" if nn_side_vote_min_share is not None else "")
             + (f",rot={query_rotations}" if query_rotations != "none" else ""))
         self._embed = embedder or _DinoEmbedder(model)
         self.labels, self.vectors = self._load_references(references, reference_detector, model, cache_dir, source)
@@ -129,7 +137,7 @@ class EmbeddingKnnClassifier(Classifier):
 
     def classify(self, crop: Image.Image) -> Prediction:
         start = time.perf_counter()
-        angles = rotations_for(crop.width, crop.height, self.query_rotations)
+        angles = rotations_for(crop.width, crop.height, self.query_rotations, bool(crop.info.get(WHOLE_IMAGE_INFO)))
         views = [self._embed(crop.rotate(a, expand=True) if a else crop) for a in angles]
         return self.classify_vector(np.stack(views) if len(views) > 1 else views[0], start, angles)
 
@@ -199,12 +207,17 @@ class EmbeddingKnnClassifier(Classifier):
             margin = None if best_other_class is None else best - best_other_class
             info["margin"] = None if margin is None else round(margin, 4)
             needed = self.nn_big_class_min_similarity if big else self.nn_min_similarity   # big class: stricter
-            side = self._side_vote(neighbours, nearest_label) if big and self.nn_side_check else None
+            side, side_share = (self._side_vote(neighbours, nearest_label) if big and self.nn_side_check
+                                else (None, 0.0))
             if side is not None:
-                info["side_vote"] = side
+                info["side_vote"], info["side_vote_share"] = side, round(side_share, 4)
             if best >= needed and (margin is None or margin >= self.nn_margin):
                 if side is not None and side != nearest_label[2]:
                     decision = "vote (1nn side mismatch)"   # TN front <-> back: the sides of its class disagree
+                    agrees = label == (*nearest_label[:2], side)   # the k-vote already says the side-vote side
+                    if (agrees and self.nn_side_vote_min_share is not None
+                            and side_share >= self.nn_side_vote_min_share):
+                        confidence, decision = self.nn_confidence, "vote (side vote agrees)"
                 else:
                     label, confidence, decision = nearest_label, self.nn_confidence, "1nn"
             else:
@@ -213,9 +226,9 @@ class EmbeddingKnnClassifier(Classifier):
         return {"label": label, "confidence": confidence, "outcome": outcome, "decision": decision, **info}
 
     @staticmethod
-    def _side_vote(neighbours: list[tuple[Label, float]], nearest_label: Label) -> str | None:
-        """The side that the k neighbours of the nearest reference's own type + country vote for (weighted by
-        similarity), or None when there is no clear winner. The front and back of one card type look alike to
+    def _side_vote(neighbours: list[tuple[Label, float]], nearest_label: Label) -> tuple[str | None, float]:
+        """(side, share): the side that the k neighbours of the nearest reference's own type + country vote for
+        (weighted by similarity) and its share of that vote (0-1), or (None, 0.0) when there is no clear winner. The front and back of one card type look alike to
         DINOv2, so for a big class the nearest reference alone is not trusted on the side (progress.md row 38)."""
         votes: dict[str, float] = {}
         for (document_type, country, side), similarity in neighbours:
@@ -223,8 +236,8 @@ class EmbeddingKnnClassifier(Classifier):
                 votes[side] = votes.get(side, 0.0) + similarity
         ranked = sorted(votes.items(), key=lambda kv: -kv[1])
         if not ranked or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
-            return None
-        return ranked[0][0]
+            return None, 0.0
+        return ranked[0][0], ranked[0][1] / sum(votes.values())
 
     def _load_references(self, csv_path, detector_spec, model, cache_dir, source=None) -> tuple[list[Label], np.ndarray]:
         """Without a source the reference images are read from disk; with one (YAML `source:`), every byte is

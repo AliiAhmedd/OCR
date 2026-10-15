@@ -36,6 +36,7 @@ import numpy as np
 from id_classifier.config import build_classifiers, build_detector, build_source, load_yaml
 from id_classifier.evaluate import _fmt as _csv_fmt, _slug, class_sizes, read_ground_truth, review_single_sample
 from id_classifier.classifiers.knn import ROTATIONS, rotations_for
+from id_classifier.detectors import FULL_IMAGE_INDEX
 from id_classifier.routing import RoutingConfig, route_image, summarize_image
 from id_classifier.sources import read_image_file
 from id_classifier.types import NO_DOCUMENT, Region
@@ -44,7 +45,8 @@ log = logging.getLogger(__name__)
 
 KNN_SETTINGS = ("k", "min_similarity", "nn_fallback", "nn_min_similarity", "nn_margin", "nn_trigger_share",
                 "nn_confidence", "query_rotations", "nn_max_class_refs",
-                "nn_big_class_min_similarity", "nn_side_check")
+                "nn_big_class_min_similarity", "nn_side_check",
+                "nn_side_vote_min_share")
 COLUMNS = ["setting", "coverage", "accepted_accuracy", "majority_accepted_accuracy", "accepted_wrong_country",
            "reviewed_multi_sample",
            "reviewed_single_sample", "beyond_accepted", "beyond_correct", "negatives_rejected", "goal"]
@@ -110,7 +112,8 @@ def embedding_pass(truths, detector, knn, source, cache: Path | None) -> list[St
 def _classify_stored(knn, region: Region, views: np.ndarray):
     """classify() on stored turns: the same turns rotations_for() would embed for this crop."""
     x0, y0, x1, y1 = region.bbox
-    angles = rotations_for(x1 - x0, y1 - y0, knn.query_rotations)
+    whole = region.region_id.endswith(f":{FULL_IMAGE_INDEX}")       # the detector found no box
+    angles = rotations_for(x1 - x0, y1 - y0, knn.query_rotations, whole)
     chosen = views[[ROTATIONS.index(a) for a in angles]]
     return knn.classify_vector(chosen if len(angles) > 1 else chosen[0], angles=angles)
 
@@ -173,7 +176,8 @@ def _setting_name(values: dict) -> str:
     short = {"min_similarity": "floor", "nn_min_similarity": "s", "nn_margin": "m", "nn_trigger_share": "share",
              "confidence_threshold": "thr", "nn_fallback": "nn", "nn_confidence": "nnconf", "k": "k",
              "query_rotations": "rot", "nn_max_class_refs": "maxrefs",
-             "nn_big_class_min_similarity": "bigs", "nn_side_check": "side"}
+             "nn_big_class_min_similarity": "bigs", "nn_side_check": "side",
+             "nn_side_vote_min_share": "sideshare"}
     return " ".join(f"{short.get(k, k)}={v}" for k, v in values.items())
 
 
@@ -206,7 +210,7 @@ def load(experiment_path: str | Path):
 KNN_DEFAULTS = {"nn_fallback": False, "min_similarity": 0.5, "nn_min_similarity": 0.8, "nn_margin": 0.05,
                 "nn_trigger_share": 0.8, "nn_confidence": 0.9, "k": 5, "query_rotations": "none",
                 "nn_max_class_refs": None, "nn_big_class_min_similarity": None,
-                "nn_side_check": False}   # EmbeddingKnnClassifier defaults
+                "nn_side_check": False, "nn_side_vote_min_share": None}   # EmbeddingKnnClassifier defaults
 
 
 def configure(knn, knn_spec: dict, spec: dict, experiment: dict) -> RoutingConfig:

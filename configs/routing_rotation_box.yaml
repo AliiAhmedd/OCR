@@ -1,0 +1,21 @@
+# Rotate only real card boxes (progress.md row 40): query_rotations portrait_box turns a portrait crop only when
+# YOLOE found a box; the whole-photo fallback stays one view. Compared with none / portrait on configuration 14's
+# settings and a small neighbourhood, same Azurite images + stored embeddings as the earlier tunes.
+#   python -m id_classifier tune-routing --grid configs/routing_rotation_box.yaml
+experiment: configs/azurite_sweep.yaml
+
+constraint:
+  min_majority_accepted_accuracy: 0.95
+
+fixed:
+  nn_fallback: true
+  nn_margin: 0.05
+  nn_trigger_share: 0.8
+  nn_max_class_refs: 5
+  nn_side_check: true
+
+grid:                                    # 3 x 3 x 3 x 3 = 81 settings
+  min_similarity: [0.55, 0.60, 0.65]
+  nn_min_similarity: [0.60, 0.65, 0.70]
+  nn_big_class_min_similarity: [0.70, 0.75, 0.80]
+  query_rotations: [none, portrait, portrait_box]

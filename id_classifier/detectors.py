@@ -11,7 +11,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 
-from id_classifier.types import ImageRecord, Region, make_region_id
+from id_classifier.types import WHOLE_IMAGE_INFO, ImageRecord, Region, make_region_id
 
 Box = tuple[int, int, int, int]  # (x0, y0, x1, y1) in pixels, x1/y1 exclusive (same as PIL's crop)
 FULL_IMAGE_INDEX = "full"        # region id suffix of YoloDetector's whole-image fallback region
@@ -95,6 +95,7 @@ class YoloDetector(Detector):
         kept = drop_duplicates(candidates, self.duplicate_iou)
 
         if not kept and self.fallback_full_image:
+            record.image.info[WHOLE_IMAGE_INFO] = True   # the crop is the whole photo, not a card box
             return [Region(
                 region_id=make_region_id(record.transaction_id, record.image_id, self.name, FULL_IMAGE_INDEX),
                 transaction_id=record.transaction_id,

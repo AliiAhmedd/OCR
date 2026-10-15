@@ -1,5 +1,5 @@
 # configs/knn_sweep.yaml with the images read from Azurite (Azure Blob emulator) instead of from disk.
-# Same 14 configurations, same ground truth, same selection rule: only the source differs, so the
+# Same 15 configurations, same ground truth, same selection rule: only the source differs, so the
 # results must match the MinIO run (configs/azurite_sweep.yaml) image for image.
 #   docker compose up -d
 #   $env:AZURE_STORAGE_CONNECTION_STRING="...see CLIhelp.md..."
@@ -90,3 +90,8 @@ configurations:
   # nearest reference agrees with the side its TN neighbours vote. Expected from tune-routing: coverage 0.805,
   # TN accepted_accuracy 0.955, accepted_accuracy 0.956, 0 wrong-country, beyond TN 2/2, blank photos 3/3.
   - {name: nn_side_check_f0.55_s0.60_big0.70, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.55, nn_fallback: true, nn_min_similarity: 0.60, nn_margin: 0.05, query_rotations: portrait, nn_max_class_refs: 5, nn_big_class_min_similarity: 0.70, nn_side_check: true}]}
+
+  # Configuration 14 + side-vote accept (progress.md rows 40-41): when the side check blocks a TN 1-NN but the k-vote
+  # already says the side its TN neighbours vote (>= 75% of that vote), the k-vote is accepted. Expected from
+  # tune-routing: coverage 0.864, accepted_accuracy 0.952, TN 0.951, 0 wrong-country, beyond TN 2/2, blanks 3/3.
+  - {name: nn_side_vote_f0.55_s0.60_big0.70_sv0.75, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.55, nn_fallback: true, nn_min_similarity: 0.60, nn_margin: 0.05, query_rotations: portrait, nn_max_class_refs: 5, nn_big_class_min_similarity: 0.70, nn_side_check: true, nn_side_vote_min_share: 0.75}]}

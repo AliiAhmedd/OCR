@@ -201,3 +201,23 @@ def test_side_check_blocks_a_big_class_1nn_whose_side_its_neighbours_contradict(
 
     knn.nn_side_check = False                                                     # check off: as row 37
     assert knn.decide(front_wins, None)["decision"] == "1nn"
+
+
+def test_side_mismatch_accepts_the_vote_when_the_side_vote_agrees_strongly_enough(tmp_path, monkeypatch):
+    """nn_side_vote_min_share: the 1-NN is blocked (wrong side), but the k-vote already has the side its TN
+    neighbours vote: accept the vote when that side vote is one-sided enough."""
+    refs = [(TN_F, unit(0)), (TN_F, unit(3)), (TN_F, unit(6)), (TN_B, unit(9)), (TN_B, unit(12)), (TN_B, unit(15)),
+            (DZ_F, unit(40, 2))]
+    knn = make_knn(tmp_path, monkeypatch, refs, nn_fallback=True, nn_min_similarity=0.5, nn_margin=0.0,
+                   nn_max_class_refs=2, nn_big_class_min_similarity=0.9, nn_side_check=True,
+                   nn_side_vote_min_share=0.7)
+    front_wins = [(TN_B, 0.95), (TN_F, 0.94), (TN_F, 0.93), (TN_F, 0.92), (DZ_F, 0.5)]   # front share 2.79/3.74 = 0.746
+
+    accepted = knn.decide(front_wins, None)
+    assert accepted["decision"] == "vote (side vote agrees)" and accepted["label"] == TN_F
+    assert accepted["confidence"] == knn.nn_confidence and accepted["side_vote_share"] == 0.746
+
+    knn.nn_side_vote_min_share = 0.8                                             # not one-sided enough
+    assert knn.decide(front_wins, None)["decision"] == "vote (1nn side mismatch)"
+    knn.nn_side_vote_min_share = None                                            # off: as configuration 14
+    assert knn.decide(front_wins, None)["decision"] == "vote (1nn side mismatch)"
