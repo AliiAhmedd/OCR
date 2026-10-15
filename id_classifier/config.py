@@ -11,6 +11,7 @@ Classes are listed as "module:ClassName" strings and imported only when used, so
 from __future__ import annotations
 
 import importlib
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -57,14 +58,27 @@ def build_detector(spec: dict):
     return build("detector", spec)
 
 
-def build_classifiers(specs: list[dict]) -> list:
+def build_classifiers(specs: list[dict], source=None) -> list:
+    """source: the experiment's image source. A classifier that reads reference images (kNN) gets it, so its
+    references come from the same storage as the images it classifies."""
     if not specs:
         raise ValueError("At least one classifier is needed")
-    classifiers = [build("classifier", s) for s in specs]
+    classifiers = [build("classifier", {**s, "source": source} if source is not None and _takes_source(s) else s)
+                   for s in specs]
     names = [c.name for c in classifiers]
     if len(set(names)) != len(names):         # names are stored per prediction, so they must be unique
         raise ValueError(f"Classifier names must be unique within one configuration, got {names}")
     return classifiers
+
+
+def _takes_source(spec: dict) -> bool:
+    """True when the classifier class of `spec` has a `source` parameter (it reads reference images)."""
+    options = REGISTRY["classifier"]
+    if spec.get("type") not in options:
+        return False                          # build() raises the "Unknown classifier type" error
+    module_name, class_name = options[spec["type"]].split(":")
+    cls = getattr(importlib.import_module(module_name), class_name)
+    return "source" in inspect.signature(cls).parameters
 
 
 def build_source(spec: dict | None):

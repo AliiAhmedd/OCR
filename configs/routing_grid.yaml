@@ -1,0 +1,14 @@
+# Grid for `python -m id_classifier tune-routing --grid configs/routing_grid.yaml` (id_classifier/routing_tune.py).
+# Only the kNN decision + routing are re-computed, on embeddings made once from the experiment's source:
+# no detector / DINOv2 per setting. Results: data/sweeps/routing_tune_<time>/results.md (written live).
+experiment: configs/azurite_sweep.yaml   # ground truth, source (Azurite), detector, kNN references, routing threshold
+
+fixed:
+  nn_fallback: true                      # every setting uses the 1-NN fallback (the baseline is the sweep's A_baseline)
+
+grid:                                    # every combination is tried: 6 x 6 x 4 x 2 x 3 = 864 settings
+  min_similarity: [0.55, 0.60, 0.65, 0.68, 0.70, 0.72]   # floor: nearest below this -> "unrecognised" -> review
+  nn_min_similarity: [0.60, 0.65, 0.70, 0.75, 0.80, 0.85] # s: the nearest reference must be at least this similar
+  nn_margin: [0.0, 0.01, 0.02, 0.05]                     # m: ...and this much closer than any other class
+  nn_trigger_share: [0.8, 1.0]                           # 1-NN is tried when the vote share is below this (1.0 = unless unanimous)
+  query_rotations: [none, portrait, all]                 # query turns compared (knn.rotations_for): portrait = only crops taller than wide

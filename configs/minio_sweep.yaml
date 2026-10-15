@@ -1,15 +1,19 @@
 # configs/knn_sweep.yaml with the images read from MinIO (S3 emulator) instead of from disk.
-# Same 12 configurations, same ground truth, same selection rule: only the source differs, so the
+# Same 14 configurations, same ground truth, same selection rule: only the source differs, so the
 # results must match the Azurite run (configs/azurite_sweep.yaml) image for image.
 #   docker compose up -d
 #   $env:AWS_ACCESS_KEY_ID="rootuser"; $env:AWS_SECRET_ACCESS_KEY="rootpass123"
 #   python -m id_classifier evaluate --config configs/minio_sweep.yaml
 
 experiment_name: minio_sweep
-ground_truth: data/ground_truth_plus.csv     # 576 NFS pictures + the 14 hand-labeled DocumentData images
+ground_truth: data/ground_truth_plus.csv     # 160 NFS pictures (TN capped at 150, --per-folder; configs/excluded_images.csv left out) + the 14 hand-labeled DocumentData images
 output_dir: data/runs
 repeats: 1                     # deterministic pipeline
 small_class_max: 10            # MA (5), DZ (3), AE, EG, IN, IQ, NG, SY land in the "indicative only" table
+# Evaluation rule (uses the ground truth, not a production rule): a document whose class (type/country/side) has
+# ONE image has no reference of its own class under leave-one-out, so it always goes to review
+# (reason single_sample_class) instead of being matched to another class. progress.md row 29.
+review_single_sample_classes: true
 
 source:
   type: s3
@@ -17,10 +21,11 @@ source:
   prefix: ""
   region: us-east-1
   endpoint_url: http://127.0.0.1:9222
-  # Three roots, all giving the key the objects were seeded under: the production mount, the local copy
-  # of the share (progress.md row 22) and the Downloads folder holding the DocumentData drop
+  # The roots giving the key the objects were seeded under: the production mount, the local copy of the
+  # share (progress.md row 22) and the Downloads folder holding the DocumentData drop on each dev machine
   # (-> DocumentData/<file>.jpg). The longest matching prefix wins.
-  strip_prefixes: ["/mnt/nfs", "C:/Users/aliah/Downloads/OCR/data/nfs_local", "C:/Users/aliah/Downloads"]
+  strip_prefixes: ["/mnt/nfs", "C:/Users/aliah/Downloads/OCR/data/nfs_local", "C:/Users/aliah/Downloads",
+                   "C:/Users/LENOVO/Downloads"]
   # credentials: never here. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the environment.
 
 routing:
@@ -48,7 +53,7 @@ knn: &knn
   type: knn
   name: dinov2_knn
   model: facebook/dinov2-small
-  references: data/ground_truth_plus.csv   # read from disk, embedded once, then cached
+  references: data/ground_truth_plus.csv   # the list only: every reference image is fetched from `source:`, embedded once, then cached per source
   reference_detector: *yoloe
   k: 5
   min_similarity: 0.72
@@ -75,3 +80,14 @@ configurations:
   # Floor variants around the middle 1-NN setting: does a lower/higher "unrecognised" floor help?
   - {name: nn_s0.80_m0.05_floor0.65, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.65, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
   - {name: nn_s0.80_m0.05_floor0.78, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.78, nn_fallback: true, nn_min_similarity: 0.80, nn_margin: 0.05}]}
+
+  # Adopted after the routing tunes (progress.md rows 33-35): 1-NN with a lower floor and portrait-gated query rotation
+  # (a crop taller than wide is also compared turned 90 / 270). Expected from tune-routing: coverage 0.882,
+  # accepted_accuracy 0.886, 0 wrong-country accepts, beyond TN 2/2, blank photos 3/3.
+  - {name: nn_portrait_f0.60_s0.65_m0.05, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.60, nn_fallback: true, nn_min_similarity: 0.65, nn_margin: 0.05, query_rotations: portrait}]}
+
+  # Baseline + 1-NN with a front/back check (progress.md rows 36-38): the 1-NN fallback decides small classes
+  # (<= 5 references) from similarity 0.60, and the big class (TN) only from 0.70 AND only when the side of its
+  # nearest reference agrees with the side its TN neighbours vote. Expected from tune-routing: coverage 0.805,
+  # TN accepted_accuracy 0.955, accepted_accuracy 0.956, 0 wrong-country, beyond TN 2/2, blank photos 3/3.
+  - {name: nn_side_check_f0.55_s0.60_big0.70, detector: *yoloe, classifiers: [{<<: *knn, min_similarity: 0.55, nn_fallback: true, nn_min_similarity: 0.60, nn_margin: 0.05, query_rotations: portrait, nn_max_class_refs: 5, nn_big_class_min_similarity: 0.70, nn_side_check: true}]}

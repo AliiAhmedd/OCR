@@ -147,3 +147,57 @@ def test_leave_one_out_skips_the_query_itself(tmp_path, monkeypatch):
 def test_fallback_off_by_default_keeps_old_behaviour(tmp_path, monkeypatch):
     clf = make_knn(tmp_path, monkeypatch, [(TN_F, unit(0))])
     assert clf.nn_fallback is False and "nn_" not in clf.model_version
+
+
+def test_big_class_keeps_the_vote_small_class_may_use_1nn(tmp_path, monkeypatch):
+    """nn_max_class_refs: TN (many references) keeps the baseline k-vote; a small class may still use 1-NN."""
+    refs = [(TN_F, unit(0)), (TN_F, unit(3)), (TN_F, unit(6)), (TN_B, unit(9)), (TN_B, unit(12)), (TN_B, unit(15)),
+            (DZ_F, unit(40, 2))]
+    knn = make_knn(tmp_path, monkeypatch, refs, nn_fallback=True, nn_min_similarity=0.5, nn_margin=0.0,
+                   nn_max_class_refs=2)
+    assert knn.class_refs[TN_F] == 3 and knn.class_refs[DZ_F] == 1
+
+    tn_nearest = [(TN_B, 0.95), (TN_F, 0.94), (TN_F, 0.93), (TN_F, 0.92)]       # vote TN_F, nearest TN_B
+    big = knn.decide(tn_nearest, best_other_class=None)
+    assert big["decision"] == "vote (1nn off: big class)" and big["label"] == TN_F
+
+    dz_nearest = [(DZ_F, 0.95), (TN_F, 0.80), (TN_F, 0.79), (TN_F, 0.78)]       # vote TN_F, nearest DZ_F
+    small = knn.decide(dz_nearest, best_other_class=0.80)
+    assert small["decision"] == "1nn" and small["label"] == DZ_F
+
+    knn.nn_max_class_refs = None                                                # gate off: as before
+    assert knn.decide(tn_nearest, best_other_class=None)["decision"] != "vote (1nn off: big class)"
+
+
+def test_big_class_may_use_1nn_only_above_its_stricter_similarity(tmp_path, monkeypatch):
+    """nn_big_class_min_similarity: TN may still use 1-NN, but only when its nearest reference is very similar."""
+    refs = [(TN_F, unit(0)), (TN_F, unit(3)), (TN_F, unit(6)), (TN_B, unit(9)), (TN_B, unit(12)), (TN_B, unit(15)),
+            (DZ_F, unit(40, 2))]
+    knn = make_knn(tmp_path, monkeypatch, refs, nn_fallback=True, nn_min_similarity=0.5, nn_margin=0.0,
+                   nn_max_class_refs=2, nn_big_class_min_similarity=0.96)
+    tn_nearest = [(TN_B, 0.95), (TN_F, 0.94), (TN_F, 0.93), (TN_F, 0.92)]       # vote TN_F, nearest TN_B at 0.95
+
+    assert knn.decide(tn_nearest, None)["decision"] == "vote (1nn rejected)"    # 0.95 < 0.96: big-class bar
+    knn.nn_big_class_min_similarity = 0.94
+    assert knn.decide(tn_nearest, None)["label"] == TN_B                        # 0.95 >= 0.94: 1-NN allowed
+    dz_nearest = [(DZ_F, 0.60), (TN_F, 0.55), (TN_F, 0.54), (TN_F, 0.53)]       # small class: normal bar 0.5
+    assert knn.decide(dz_nearest, 0.55)["decision"] == "1nn"
+
+
+def test_side_check_blocks_a_big_class_1nn_whose_side_its_neighbours_contradict(tmp_path, monkeypatch):
+    """nn_side_check: TN front and back look alike, so a TN 1-NN must agree with the side its TN neighbours vote."""
+    refs = [(TN_F, unit(0)), (TN_F, unit(3)), (TN_F, unit(6)), (TN_B, unit(9)), (TN_B, unit(12)), (TN_B, unit(15)),
+            (DZ_F, unit(40, 2))]
+    knn = make_knn(tmp_path, monkeypatch, refs, nn_fallback=True, nn_min_similarity=0.5, nn_margin=0.0,
+                   nn_max_class_refs=2, nn_big_class_min_similarity=0.9, nn_side_check=True)
+
+    front_wins = [(TN_B, 0.95), (TN_F, 0.94), (TN_F, 0.93), (TN_F, 0.92), (DZ_F, 0.5)]   # nearest back, TN votes front
+    blocked = knn.decide(front_wins, None)
+    assert blocked["decision"] == "vote (1nn side mismatch)" and blocked["side_vote"] == "front"
+
+    back_wins = [(TN_B, 0.95), (TN_B, 0.94), (TN_F, 0.93), (DZ_F, 0.92), (DZ_F, 0.91)]   # diluted, TN votes back
+    allowed = knn.decide(back_wins, 0.92)
+    assert allowed["decision"] == "1nn" and allowed["label"] == TN_B
+
+    knn.nn_side_check = False                                                     # check off: as row 37
+    assert knn.decide(front_wins, None)["decision"] == "1nn"

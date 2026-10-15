@@ -28,6 +28,8 @@ cd /mnt/c/Users/LENOVO/Downloads/Valify_Project1_OCR
 | `pytest` | Runs the automated tests (no real images, no real model) | `tests/` | nothing |
 | `build-ground-truth` | Builds the labeled answer key from the NFS folders (distinct pictures only) | NFS zips | `data/ground_truth.csv` |
 | `evaluate` | Detects + classifies + routes every ground-truth image and scores it | experiment YAML + ground truth | `data/runs/<name>_<time>/` |
+| `backfill-report` | Adds the "Beyond <biggest country>" section to an older run's report (no re-run) | a run folder | its `comparison.md`, `beyond_majority.csv` |
+| `tune-routing` | Grid over the kNN decision / routing settings on embeddings made once | grid YAML (+ its experiment) | `data/sweeps/routing_tune_<time>/` |
 
 ## Tests
 
@@ -68,6 +70,10 @@ docker compose down -v     # stop AND delete the seeded data
 | MinIO S3 API | `http://127.0.0.1:9222` (`endpoint_url`) | `AWS_ACCESS_KEY_ID=rootuser`, `AWS_SECRET_ACCESS_KEY=rootpass123` |
 | MinIO web console | `http://127.0.0.1:9223` in a browser | same user / password |
 
+- After a restart of this Windows machine the emulators are down (emulator tests then show 1 skipped): start
+  Docker Desktop (`C:\Users\LENOVO\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe`; `docker` is not on
+  PATH, the CLI is `...\DockerDesktop\resources\bin\docker.exe`), then `docker compose up -d`. The seeded objects
+  are kept in the named volumes, no re-seeding needed (2026-10-14: 172 objects each after a restart).
 - Ports listen on `127.0.0.1` only: the seeded data may be real ID images, which never leave this machine.
 - MinIO uses the `cgr.dev/chainguard/minio` image: `minio/minio` was deleted from Docker Hub (2026-09-11).
 - Quick check: `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9222/minio/health/live` gives `200`.
@@ -96,6 +102,15 @@ python scripts/seed_emulators.py --only azure    # or --only s3
 | `--manifest` | `data/emulator_seed.csv` | written list: key, NFS path, size, sha256 of each zip |
 
 Safe to re-run: objects already there are skipped (second run prints `0 uploaded, 161 already there`).
+
+The hand-labeled DocumentData drop (needed by the sweep configs, `data/ground_truth_plus.csv`) lives outside the
+share, so it is seeded on its own, with its own root and its own manifest (the tests read `data/emulator_seed.csv`):
+
+```bash
+python scripts/seed_emulators.py --ground-truth data/document_data.csv \
+    --strip-prefix C:/Users/LENOVO/Downloads --manifest data/emulator_seed_document_data.csv
+# -> 14 uploaded per emulator, keys DocumentData/<file>.jpg; both emulators then hold 175 objects
+```
 Check in the MinIO console (`http://127.0.0.1:9223`, bucket `ids`).
 
 ### Emulator tests
@@ -124,10 +139,20 @@ python -m id_classifier build-ground-truth --root /mnt/nfs --per-folder 150
 | --- | --- | --- |
 | `--root` | `/mnt/nfs` | NFS root as this machine sees it |
 | `--out` | `data/ground_truth.csv` | output CSV |
-| `--per-folder` | all | at most N distinct pictures per folder (random) |
+| `--per-folder` | 150 | at most N distinct pictures per folder (random); 0 = all |
 | `--seed` | 42 | same seed = same sample |
 
 The labeled folders are listed in `FOLDER_LABELS` in `id_classifier/ground_truth.py`.
+
+**Excluded images:** `configs/excluded_images.csv` (`key,reason,reported`, key = `<folder>/<file>`) lists pictures
+whose folder label is wrong (e.g. `mar_nid_ocr/1575124_..._back_img.zip`, an Egyptian ID in the Moroccan folder).
+They are left out of every rebuild; the NFS share itself is never changed. When adding a line, also drop the row from
+the existing ground-truth CSVs and delete the object from the emulators (progress.md row 30 shows how).
+
+**Relabelled images:** `configs/relabelled_images.csv` (`key,document_type,issuing_country,document_side,reason,reported`)
+replaces the folder's label for pictures that are something else, e.g. the selfie
+`dza_nid_ocr/1572908_..._front_img.zip` -> `none,unknown,n/a` (kept as a no-document example). Applied on every
+rebuild; also update the existing ground-truth CSVs when adding a line (progress.md row 32).
 
 ## ingest-labeled-folder
 
@@ -193,6 +218,87 @@ python -m id_classifier evaluate --config configs/azurite_eval.yaml
 Writes `data/runs/<experiment>_<time>/`: `comparison.md` (read this first), `confusion_<config>.png/.md`,
 `predictions_<config>.csv`. A progress bar shows how many images are done.
 
+Live results: `comparison.md` (and the CSVs) are rewritten after **every** finished configuration, so a long sweep can
+be read while it runs. The top says `Status: RUNNING. X of N configurations done, Y left (~Z min to go ...)` and the
+winner is shown as "Leading so far (provisional)" until the last configuration is done. With a `source:` the kNN
+reference images are fetched from that storage too (nothing is read from disk); an unreadable reference stops the run.
+
+`comparison.md` also has a **"Beyond <biggest country>"** section (TN today, 150 of 173 documents): coverage, accepted
+accuracy and wrong-country accepts over the OTHER countries only, plus per country `correct / auto-accepted / documents`.
+The overall coverage / accepted_accuracy mostly measure the biggest country; read this section for the rest.
+
+## backfill-report
+
+Adds the "Beyond <biggest country>" section to a run made before it existed, from that run's own
+`predictions_<config>.csv` files. Nothing is re-run; the rest of `comparison.md` is left as it was. Safe to repeat.
+
+```bash
+python -m id_classifier backfill-report --run data/runs/azurite_sweep_20261014-080858
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--run` | required | run folder (holds `comparison.csv`, `comparison.md`, `predictions_<config>.csv`) |
+
+## tune-routing
+
+Tunes only the LAST step (kNN floor, 1-NN similarity / margin / trigger share, routing threshold) without re-running
+the pipeline per setting. The images are fetched from the experiment's `source:`, cropped and embedded **once**
+(~75 s for 175 images; cached in `data/cache/routing_queries_<key>.*`, so the next grid skips it); then every setting
+is decided and routed by the real code on the stored vectors (milliseconds each).
+
+```bash
+# Azurite: export AZURE_STORAGE_CONNECTION_STRING first (see "Emulator tests")
+python -m id_classifier tune-routing --grid configs/routing_grid.yaml
+python -m id_classifier tune-routing --grid configs/routing_grid.yaml --check-run data/runs/azurite_sweep_20261014-080858
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--grid` | required | grid YAML: `experiment:` (ground truth, source, detector, kNN), `fixed:` and `grid:` (lists, every combination) |
+| `--out` | `data/sweeps/routing_tune_<time>/` | output folder |
+| `--check-run` | none | a sweep run of the same experiment: replays its configurations and compares image for image (`check.md`) |
+
+The embedding pass stores every region in 4 turns (0/90/180/270), so `query_rotations` can be tuned too:
+`none` (as before), `portrait` (a crop taller than wide is also compared turned 90 and 270; the best match per
+reference counts) or `all` (every crop in all 4 turns). The same setting exists on the kNN in experiment YAMLs.
+
+`nn_max_class_refs` (kNN setting, tunable): the 1-NN fallback may only decide when the nearest reference's label has
+at most this many references; a bigger class (TN) keeps the k-vote, unless `nn_big_class_min_similarity` is set:
+then a big class may use 1-NN too, but only from that (stricter) similarity on. `nn_side_check: true` adds a
+front/back check to that big-class 1-NN: the nearest reference's side must agree with the side the k neighbours of
+the same type + country vote, else the k-vote stands. A grid file may add
+`constraint: {min_majority_accepted_accuracy: 0.95}`: results.md then gets a "Constrained best" section (biggest
+country's accepted accuracy at least that, 0 wrong-country, ranked by correct non-TN accepts) and the
+`majority_accepted_accuracy` column.
+
+Writes `results.md` / `results.csv` **live** (one row per setting as soon as it is done), then "Best settings"
+(ranked: wrong-country accepts, then multi-sample documents in review, then coverage). Goal column = no document of a
+class with 2+ images left in review AND no document auto-accepted with the wrong country.
+
+## scripts/inspect_crops.py (crop review)
+
+Shows what the kNN actually embeds for every document outside the biggest country: the photo with the detector box,
+the crop, and the nearest other reference's crop, plus the numbers (box share of the photo, aspect ratio, detector
+confidence, "no box found" fallback, nearest label + similarity, rank of the true class). Needs a `tune-routing` run
+first (it reuses its regions + embeddings) and re-fetches only the shown images from the experiment's `source:`.
+
+```bash
+python scripts/inspect_crops.py --experiment configs/azurite_sweep.yaml --configuration nn_s0.85_m0.02
+# --all: every document; --configuration: whose routing (predicted / routed / reasons) is shown
+# -> data/crop_review/<time>/index.html (pictures: real IDs, local only) + crops.csv (numbers only)
+```
+
+The sheet lists the classes with 2+ images first (these should be recognised), then the single-sample classes.
+
+### Evaluation rule: single-sample classes go to review
+
+`review_single_sample_classes: true` in an experiment YAML (on in `azurite_sweep.yaml` / `minio_sweep.yaml`): a
+document whose class (type/country/side) has ONE image in the ground truth has no reference of its own class under
+leave-one-out, so it always goes to review (reason `single_sample_class`) instead of being matched to another class.
+Applied by `evaluate`, `tune-routing` and the crop sheet. It uses the ground truth, so it is an evaluation rule, not
+something the live pipeline can do.
+
 ## Config files
 
 | File | Used by |
@@ -200,4 +306,10 @@ Writes `data/runs/<experiment>_<time>/`: `comparison.md` (read this first), `con
 | `configs/nfs_eval.yaml` | `evaluate` (images from the NFS share) |
 | `configs/minio_eval.yaml` | `evaluate`, images from MinIO (needs the emulators) |
 | `configs/azurite_eval.yaml` | `evaluate`, images from Azurite (needs the emulators) |
+| `configs/azurite_sweep.yaml` / `minio_sweep.yaml` | `evaluate`: the 12-configuration kNN sweep, images and references from Azurite / MinIO |
+| `configs/routing_grid.yaml` | `tune-routing`: floor x s x m x share x query_rotations (864 settings) on the Azurite sweep experiment |
+| `configs/routing_baseline.yaml` | `tune-routing`: the baseline (k-vote, no 1-NN) on the same images, to compare with the grid |
+| `configs/routing_combined.yaml` | `tune-routing`: 1-NN gated by `nn_max_class_refs` (big classes keep the k-vote), with the constraint TN accepted accuracy >= 0.95 |
+| `configs/routing_big_strict.yaml` | `tune-routing`: big classes may use 1-NN above `nn_big_class_min_similarity` (stricter bar), same constraint |
+| `configs/routing_side_check.yaml` | `tune-routing`: big-class 1-NN with the front/back check `nn_side_check` on / off, same constraint |
 

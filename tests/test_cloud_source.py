@@ -198,4 +198,83 @@ def test_emulator_experiment_configs_build_their_source(name):
     assert {k: v for k, v in experiment.items() if k not in ("source", "experiment_name")} == \
            {k: v for k, v in nfs.items() if k != "experiment_name"}           # the same experiment otherwise
     source = build_source(experiment["source"])
-    assert source.strip_prefixes == ["/mnt/nfs"]
+    # the production mount plus the local copies of the share on the dev machines
+    assert source.strip_prefixes == experiment["source"]["strip_prefixes"] and "/mnt/nfs" in source.strip_prefixes
+
+
+# ---------------------------------------------------------------- kNN references from the source
+
+def _knn_references(tmp_path, n: int = 3):
+    """A reference CSV whose paths do NOT exist on disk (/mnt/nfs/refs/...), and the same images in a bucket."""
+    rows = ["transaction_id,image_id,image_path,document_type,issuing_country,document_side"]
+    objects = {}
+    for i in range(n):
+        objects[f"refs/ref{i}.png"] = image_bytes((i, 10, 20))
+        rows.append(f"{i + 1},front,/mnt/nfs/refs/ref{i}.png,national_id,TN,front")
+    csv_path = tmp_path / "refs.csv"
+    csv_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return csv_path, objects
+
+
+def _knn_spec(csv_path) -> dict:
+    return {"type": "knn", "references": str(csv_path), "reference_detector": {"type": "fixed"},
+            "cache_dir": None, "embedder": lambda image: [1.0, 0.0]}
+
+
+def test_knn_references_are_fetched_from_the_source_not_from_disk(tmp_path, monkeypatch):
+    monkeypatch.setitem(config.REGISTRY["detector"], "fixed", "fakes:FixedDetector")
+    csv_path, objects = _knn_references(tmp_path)
+    fetcher = DictFetcher(objects)
+
+    knn = config.build("classifier", {**_knn_spec(csv_path), "source": FetcherSource(fetcher, ["/mnt/nfs"])})
+
+    assert fetcher.asked == ["refs/ref0.png", "refs/ref1.png", "refs/ref2.png"]   # every byte from the bucket
+    assert len(knn.labels) == 3
+
+
+def test_knn_reference_missing_from_the_source_is_an_error_not_skipped(tmp_path, monkeypatch):
+    """A silently smaller reference set gives wrong scores that look fine (14 of 175 on Windows, 2026-10-14)."""
+    monkeypatch.setitem(config.REGISTRY["detector"], "fixed", "fakes:FixedDetector")
+    csv_path, objects = _knn_references(tmp_path)
+    del objects["refs/ref1.png"]
+
+    with pytest.raises(ValueError, match=r"1 of 3 reference images .* could not be read from dict:test"):
+        config.build("classifier", {**_knn_spec(csv_path), "source": FetcherSource(DictFetcher(objects), ["/mnt/nfs"])})
+
+
+def test_build_classifiers_hands_the_experiment_source_to_knn(tmp_path, monkeypatch):
+    monkeypatch.setitem(config.REGISTRY["detector"], "fixed", "fakes:FixedDetector")
+    csv_path, objects = _knn_references(tmp_path)
+    fetcher = DictFetcher(objects)
+
+    [knn] = config.build_classifiers([_knn_spec(csv_path)], FetcherSource(fetcher, ["/mnt/nfs"]))
+
+    assert len(fetcher.asked) == 3 and len(knn.labels) == 3
+
+
+# ---------------------------------------------------------------- live reports
+
+def test_reports_are_rewritten_after_every_configuration(tmp_path, monkeypatch):
+    """A 12-configuration sweep takes hours on CPU: comparison.md is readable after each finished one."""
+    from id_classifier import evaluate
+
+    monkeypatch.setitem(config.REGISTRY["detector"], "fixed", "fakes:FixedDetector")
+    monkeypatch.setitem(config.REGISTRY["classifier"], "color", "fakes:ColorClassifier")
+    path = _experiment(tmp_path, tmp_path / "nfs")
+    experiment = yaml.safe_load(path.read_text(encoding="utf-8"))
+    experiment["configurations"] = [{**experiment["configurations"][0], "name": f"c{i}"} for i in (1, 2, 3)]
+    path.write_text(yaml.safe_dump(experiment), encoding="utf-8")
+
+    snapshots, real = [], evaluate.write_reports
+    def recording(out_dir, *args, **kwargs):
+        real(out_dir, *args, **kwargs)
+        snapshots.append((out_dir / "comparison.md").read_text(encoding="utf-8"))
+    monkeypatch.setattr(evaluate, "write_reports", recording)
+
+    run_experiment(path)
+
+    assert len(snapshots) == 3                                       # after c1, after c2, final
+    assert "RUNNING. 1 of 3 configurations done, 2 left" in snapshots[0] and "c2" not in snapshots[0]
+    assert "Leading so far (provisional)" in snapshots[0]
+    assert "RUNNING. 2 of 3 configurations done, 1 left" in snapshots[1]
+    assert "RUNNING" not in snapshots[2] and "## Winner:" in snapshots[2] and "c3" in snapshots[2]

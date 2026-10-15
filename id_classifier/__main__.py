@@ -4,6 +4,8 @@
     ingest-labeled-folder  write a ground-truth CSV from hand-labeled files (<country>_<docType>_<side>_img[_n])
                            and optionally merge it with another ground truth
     evaluate             detect + classify + route every ground-truth image and write the results report
+    backfill-report      add the "Beyond <biggest country>" section to an older run's report (no re-run)
+    tune-routing         grid over the kNN decision / routing settings on stored embeddings, results live in a file
 
 See README.md for the full walk-through.
 """
@@ -14,7 +16,7 @@ import argparse
 import logging
 import sys
 
-from id_classifier.evaluate import run_experiment
+from id_classifier.evaluate import backfill_beyond_majority, run_experiment
 from id_classifier.ground_truth import build_ground_truth
 from id_classifier.labeled_files import ground_truth_rows, merge_ground_truths, read_labeled_folder, summarize, write_rows
 
@@ -40,6 +42,18 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     result = run_experiment(args.config)
     print(f"Results: {result.output_dir / 'comparison.md'}")
     print(f"Winner: {result.winner or 'none (no configuration meets the selection rule)'}")
+    return 0
+
+
+def cmd_backfill_report(args: argparse.Namespace) -> int:
+    print(f"Updated {backfill_beyond_majority(args.run)}")
+    return 0
+
+
+def cmd_tune_routing(args: argparse.Namespace) -> int:
+    from id_classifier.routing_tune import run
+
+    print(f"Results: {run(args.grid, args.out, args.check_run)}")
     return 0
 
 
@@ -70,6 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = commands.add_parser("evaluate", help="run the configuration(s) of an experiment YAML and write the report")
     p.add_argument("--config", required=True, help="experiment YAML, e.g. configs/nfs_eval.yaml")
     p.set_defaults(func=cmd_evaluate)
+
+    p = commands.add_parser("backfill-report",
+                            help="add the 'Beyond <biggest country>' section to an older run's comparison.md")
+    p.add_argument("--run", required=True, help="run folder, e.g. data/runs/azurite_sweep_20261014-080858")
+    p.set_defaults(func=cmd_backfill_report)
+
+    p = commands.add_parser("tune-routing", help="tune the kNN decision / routing settings without re-running the pipeline")
+    p.add_argument("--grid", required=True, help="grid YAML, e.g. configs/routing_grid.yaml")
+    p.add_argument("--out", help="output folder (default: data/sweeps/routing_tune_<time>)")
+    p.add_argument("--check-run", help="a sweep run folder: replay its configurations and compare image for image")
+    p.set_defaults(func=cmd_tune_routing)
     return parser
 
 

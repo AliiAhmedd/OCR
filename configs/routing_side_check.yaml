@@ -1,0 +1,21 @@
+# Front/back check for the big class (progress.md row 38): TN may use the 1-NN fallback (from
+# nn_big_class_min_similarity on), but only when the side of its nearest reference agrees with the side the TN
+# neighbours vote (nn_side_check). Small classes unchanged. Same Azurite images + stored embeddings as row 37.
+#   python -m id_classifier tune-routing --grid configs/routing_side_check.yaml
+experiment: configs/azurite_sweep.yaml
+
+constraint:
+  min_majority_accepted_accuracy: 0.95
+
+fixed:
+  nn_fallback: true
+  query_rotations: portrait
+  nn_max_class_refs: 5
+
+grid:                                    # 3 x 3 x 3 x 2 x 6 x 2 = 648 settings
+  min_similarity: [0.55, 0.60, 0.65]
+  nn_min_similarity: [0.60, 0.65, 0.70]
+  nn_margin: [0.0, 0.02, 0.05]
+  nn_trigger_share: [0.8, 1.0]
+  nn_big_class_min_similarity: [0.70, 0.75, 0.80, 0.84, 0.88, 0.90]
+  nn_side_check: [false, true]

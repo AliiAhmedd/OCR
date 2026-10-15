@@ -1,0 +1,20 @@
+# Baseline + 1-NN combined (progress.md row 36): the 1-NN fallback may only decide when the nearest reference's label
+# has at most nn_max_class_refs references, so the big class (TN, 74 per side) keeps the baseline k-vote and its
+# accuracy, while the small classes keep the 1-NN that recognises them.
+#   python -m id_classifier tune-routing --grid configs/routing_combined.yaml
+# Same experiment, images and stored embeddings as configs/routing_grid.yaml.
+experiment: configs/azurite_sweep.yaml
+
+constraint:
+  min_majority_accepted_accuracy: 0.95   # TN accepted accuracy must stay at the baseline's level (0.952)
+
+fixed:
+  nn_fallback: true
+
+grid:                                    # 5 x 5 x 3 x 2 x 2 x 4 = 1200 settings
+  min_similarity: [0.55, 0.60, 0.65, 0.68, 0.72]
+  nn_min_similarity: [0.60, 0.65, 0.70, 0.75, 0.80]
+  nn_margin: [0.0, 0.02, 0.05]
+  nn_trigger_share: [0.8, 1.0]
+  query_rotations: [none, portrait]
+  nn_max_class_refs: [null, 5, 10, 20]   # null = no gate (1-NN for every class, as in rows 33-35)

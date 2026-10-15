@@ -1,0 +1,20 @@
+# Middle ground between the baseline and the 1-NN for the big class (progress.md row 37): TN may use the 1-NN
+# fallback too, but only from a stricter similarity (nn_big_class_min_similarity); small classes keep the normal bar.
+#   python -m id_classifier tune-routing --grid configs/routing_big_strict.yaml
+# Same experiment, images (Azurite) and stored embeddings as configs/routing_combined.yaml.
+experiment: configs/azurite_sweep.yaml
+
+constraint:
+  min_majority_accepted_accuracy: 0.95   # TN accepted accuracy at the baseline's level
+
+fixed:
+  nn_fallback: true
+  query_rotations: portrait
+  nn_max_class_refs: 5                   # big = more than 5 references (TN: 74-76 per side; every other class <= 3)
+
+grid:                                    # 3 x 3 x 3 x 2 x 10 = 540 settings
+  min_similarity: [0.55, 0.60, 0.65]
+  nn_min_similarity: [0.60, 0.65, 0.70]
+  nn_margin: [0.0, 0.02, 0.05]
+  nn_trigger_share: [0.8, 1.0]
+  nn_big_class_min_similarity: [null, 0.80, 0.82, 0.84, 0.86, 0.88, 0.90, 0.92, 0.94, 0.96]   # null = no 1-NN for TN

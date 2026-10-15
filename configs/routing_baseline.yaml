@@ -1,0 +1,12 @@
+# Baseline for the routing tunes (progress.md rows 33-34): Config A's k-vote WITHOUT the 1-NN fallback, on the same
+# experiment, images and stored embeddings as configs/routing_grid.yaml, so the two results.md compare directly.
+#   python -m id_classifier tune-routing --grid configs/routing_baseline.yaml
+# floor 0.72 = A_baseline exactly; the lower floors are the ones the 1-NN grid used.
+experiment: configs/azurite_sweep.yaml
+
+fixed:
+  nn_fallback: false                     # the baseline: k-vote only
+
+grid:                                    # 6 x 2 = 12 settings
+  min_similarity: [0.55, 0.60, 0.65, 0.68, 0.70, 0.72]
+  query_rotations: [none, portrait]

@@ -23,6 +23,7 @@ import logging
 import re
 import shutil
 import statistics
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -388,8 +389,99 @@ CLASS_COLUMNS = ["n", "classified_correctly", "unrecognised", "classified_as_oth
                  "auto_accepted_correctly"]
 
 
+BEYOND_HEADERS = ["config", "documents", "auto_accepted", "accepted_correct", "accepted_wrong_country", "coverage",
+                  "accepted_accuracy"]
+
+
+def _accepted(row: dict) -> bool:
+    return str(row["needs_review"]).lower() not in ("true", "1")
+
+
+def _all_correct(row: dict) -> bool:
+    return (row["pred_type"], row["pred_country"], row["pred_side"]) == \
+           (row["true_type"], row["true_country"], row["true_side"])
+
+
+def beyond_majority(predictions: dict[str, list[dict]]) -> tuple[str, list[str], list[list]]:
+    """What is auto-accepted OUTSIDE the biggest country. With 150 Tunisian cards against 1-7 of every other
+    country, coverage and accepted_accuracy over all documents mostly measure Tunisia (progress.md row 26).
+
+    predictions: config -> its per-image rows (the columns of predictions_<config>.csv, one repeat or more).
+    Returns the majority country, the markdown lines of the report section and the CSV rows (BEYOND_HEADERS)."""
+    rows = {c: [r for r in rs if r["true_type"] != NO_DOCUMENT] for c, rs in predictions.items()}
+    first = next(iter(rows.values()), [])
+    sizes = Counter(r["true_country"] for r in first if str(r.get("repeat", 1)) == "1")
+    if not sizes:
+        return "", [], []
+    majority = sizes.most_common(1)[0][0]
+    countries = sorted(c for c in sizes if c != majority)
+
+    csv_rows, country_cells = [], []
+    for config, docs in rows.items():
+        others = [r for r in docs if r["true_country"] != majority]
+        accepted = [r for r in others if _accepted(r)]
+        correct = sum(map(_all_correct, accepted))
+        wrong_country = sum(r["pred_country"] != r["true_country"] for r in accepted)
+        csv_rows.append([config, len(others), len(accepted), correct, wrong_country,
+                         _rate([_accepted(r) for r in others]), _rate([_all_correct(r) for r in accepted])])
+        cells = []
+        for country in countries:
+            items = [r for r in docs if r["true_country"] == country]
+            took = [r for r in items if _accepted(r)]
+            cells.append(f"{sum(map(_all_correct, took))}/{len(took)}/{len(items)}")
+        country_cells.append([config, *cells])
+
+    lines = [
+        f"## Beyond {majority} (the biggest country, {sizes[majority]} of {sum(sizes.values())} documents)",
+        "",
+        f"coverage and accepted_accuracy above are dominated by {majority}. The same numbers over the other "
+        f"countries only: what does the classifier dare to auto-accept outside {majority}, and is it right?",
+        "",
+        _md_table(BEYOND_HEADERS, csv_rows),
+        "",
+        "Per country: **correct / auto-accepted / documents** (correct = type, country and side all right).",
+        "",
+        _md_table(["config", *countries], country_cells),
+        "",
+    ]
+    return majority, lines, csv_rows
+
+
+def write_beyond_majority(out_dir: Path, predictions: dict[str, list[dict]]) -> list[str]:
+    """Writes beyond_majority.csv and returns the markdown section for comparison.md."""
+    _, lines, csv_rows = beyond_majority(predictions)
+    if lines:
+        _write_csv(out_dir / "beyond_majority.csv", BEYOND_HEADERS, csv_rows)
+    return lines
+
+
+def backfill_beyond_majority(run_dir: str | Path) -> Path:
+    """Adds the "Beyond <biggest country>" section to the comparison.md of a run made before it existed, from
+    the run's own predictions_<config>.csv files: nothing is re-run. Replaces the section if it is already there."""
+    run_dir = Path(run_dir)
+    with (run_dir / "comparison.csv").open(newline="", encoding="utf-8") as f:
+        configs = [row["config"] for row in csv.DictReader(f)]
+    predictions = {}
+    for config in configs:
+        with (run_dir / f"predictions_{_slug(config)}.csv").open(newline="", encoding="utf-8") as f:
+            predictions[config] = list(csv.DictReader(f))
+    section = write_beyond_majority(run_dir, predictions)
+    report = run_dir / "comparison.md"
+    text = report.read_text(encoding="utf-8")
+    text = re.sub(r"## Beyond .*?(?=## Per-country accuracy)", "", text, flags=re.S)   # an older copy
+    marker = "## Per-country accuracy"
+    if marker not in text:
+        raise ValueError(f"{report}: no '{marker}' heading to put the section before")
+    report.write_text(text.replace(marker, "\n".join(section) + "\n" + marker, 1), encoding="utf-8")
+    return report
+
+
 def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str | None, notes: dict,
-                  rule: SelectionRule, dataset_info: dict, small_class_max: int = SMALL_CLASS_MAX) -> None:
+                  rule: SelectionRule, dataset_info: dict, small_class_max: int = SMALL_CLASS_MAX,
+                  status: str | None = None, predictions: dict[str, list[dict]] | None = None) -> None:
+    """status: set while the run is still going (the reports are rewritten after every configuration, so they
+    can be read live); the winner is then only the best of the configurations finished so far.
+    predictions: config -> per-image rows, for the "Beyond <biggest country>" section."""
     # No no-document images in the ground truth -> that metric cannot be measured: leave it out of the report.
     # (It is still computed, and checked by the selection rule, as soon as such images are added.)
     columns = [m for m in COMPARISON_COLUMNS
@@ -424,14 +516,21 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
         f"- Repeats per configuration: {dataset_info['repeats']}",
         f"- Routing: {dataset_info['routing']}",
         f"- Images read from: {dataset_info.get('source', 'local files')}",
+        *([f"- Evaluation rule `review_single_sample_classes`: the {dataset_info['single_sample_documents']} documents "
+           "whose class (type/country/side) has ONE image go to review (`single_sample_class`): with no reference of "
+           "their own class they can only match another class. Uses the ground truth: not a production rule."]
+          if dataset_info.get("single_sample_documents") is not None else []),
         f"- Selection rule (fixed before the run): {rule.describe()}",
         "",
-        f"## Winner: **{winner}**" if winner else "## Winner: none. No configuration meets the selection rule.",
+        *([f"## Status: RUNNING. {status}", ""] if status else []),
+        (f"## {'Leading so far (provisional)' if status else 'Winner'}: **{winner}**" if winner
+         else "## Winner: none. No configuration meets the selection rule" + (" yet." if status else ".")),
         "",
         "## Comparison",
         "",
         _md_table(headers, rows),
         "",
+        *(write_beyond_majority(out_dir, predictions) if predictions else []),
         "## Per-country accuracy",
         "",
         _md_table(country_headers, country_rows),
@@ -455,24 +554,52 @@ def write_reports(out_dir: Path, name: str, summaries: list[dict], winner: str |
     (out_dir / "comparison.md").write_text("\n".join(parts), encoding="utf-8")
 
 
+PREDICTION_HEADERS = ["repeat", "transaction_id", "image_id", "true_type", "true_country", "true_side",
+                      "pred_type", "pred_country", "pred_side", "outcome", "confidence", "needs_review", "reasons",
+                      "latency_ms",
+                      "classifier_outputs"]   # raw answer per classifier for the chosen region (labels/scores only)
+
+
 def write_predictions(out_dir: Path, name: str, rows: list[list]) -> None:
-    headers = ["repeat", "transaction_id", "image_id", "true_type", "true_country", "true_side",
-               "pred_type", "pred_country", "pred_side", "outcome", "confidence", "needs_review", "reasons", "latency_ms",
-               "classifier_outputs"]   # raw answer per classifier for the chosen region (labels/scores only)
-    _write_csv(out_dir / f"predictions_{_slug(name)}.csv", headers, rows)
+    _write_csv(out_dir / f"predictions_{_slug(name)}.csv", PREDICTION_HEADERS, rows)
 
 
 # ---------------------------------------------------------------- main entry point
 
-def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingConfig, source=None) -> ImageOutcome:
+SINGLE_SAMPLE_CLASS = "single_sample_class"   # review reason added by the evaluation rule below
+
+
+def class_sizes(truths) -> Counter:
+    """Images per document class (type, country, side) in the ground truth."""
+    return Counter((t.document_type, t.issuing_country, t.document_side) for t in truths if t.is_document)
+
+
+def review_single_sample(truth, summary, sizes: Counter | None) -> None:
+    """EVALUATION RULE (YAML `review_single_sample_classes: true`), uses the ground truth: a document whose class
+    has only ONE image in the ground truth has no reference of its own class under leave-one-out, so the kNN can
+    only match it to another class (passport/NG/front, passport/SY/front, ...). It goes to review, with reason
+    "single_sample_class", instead of counting as a wrong guess. A live pipeline cannot do this (it has no ground
+    truth); there such a card must be caught by the similarity floor ("unrecognised")."""
+    if sizes is None or not truth.is_document:
+        return
+    if sizes[(truth.document_type, truth.issuing_country, truth.document_side)] < 2:
+        summary.needs_review = True
+        if SINGLE_SAMPLE_CLASS not in summary.reasons:
+            summary.reasons.append(SINGLE_SAMPLE_CLASS)
+
+
+def _evaluate_one(truth: GroundTruth, detector, classifiers, routing: RoutingConfig, source=None,
+                  sizes: Counter | None = None) -> ImageOutcome:
     """Loads one image, runs it, then drops the pixels: only labels and timings are kept, so memory stays
     flat however large the ground truth is (images are re-read for every configuration and repeat).
-    Without a source the image is read from disk; with one (YAML `source:`), from that storage."""
+    Without a source the image is read from disk; with one (YAML `source:`), from that storage.
+    sizes: class sizes when the single-sample evaluation rule is on (review_single_sample)."""
     if source is None:
         record = read_image_file(truth.transaction_id, truth.image_id, truth.image_path)
     else:
         record = source.fetch(truth.transaction_id, truth.image_id, truth.reference)
     outcome = process_image(record, detector, classifiers, routing)
+    review_single_sample(truth, outcome.summary, sizes)
     record.image = None
     for region in outcome.regions:
         region.crop = None
@@ -516,15 +643,29 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
     out_dir = _new_run_dir(Path(config.get("output_dir", "data/runs")), name)
     shutil.copyfile(config_path, out_dir / "experiment.yaml")  # keep the exact config next to its results
 
-    summaries, fetch_failed = [], 0
+    sizes = class_sizes(truths) if config.get("review_single_sample_classes") else None
+    single = sum(n for n in sizes.values() if n < 2) if sizes else 0
+
+    def info() -> dict:
+        return {
+            "ground_truth": config["ground_truth"], "images": len(truths), "documents": documents,
+            "negatives": len(truths) - documents, "fetch_failed": fetch_failed, "repeats": repeats,
+            "routing": routing.describe(), "source": source_name,
+            "single_sample_documents": single if sizes else None,
+        }
+
+    small_class_max = int(config.get("small_class_max", SMALL_CLASS_MAX))
+    summaries, fetch_failed, predictions = [], 0, {}
+    started = time.perf_counter()
     for spec in configurations:
         detector = build_detector(spec.get("detector"))
-        classifiers = build_classifiers(spec.get("classifiers", []))   # models are loaded once per configuration
+        # models are loaded once per configuration; with a `source:`, kNN references are fetched from it too
+        classifiers = build_classifiers(spec.get("classifiers", []), source)
         per_repeat, prediction_log = [], []
         for repeat in range(1, repeats + 1):
             outcomes = []
             for number, t in enumerate(truths, start=1):
-                outcome = _evaluate_one(t, detector, classifiers, routing, source)
+                outcome = _evaluate_one(t, detector, classifiers, routing, source, sizes)
                 outcomes.append(outcome)
                 log.info("%s", _progress_line(number, len(truths), t, outcome))
             fetch_failed = sum(o.record.fetch_status != "ok" for o in outcomes)
@@ -542,14 +683,18 @@ def run_experiment(config_path: str | Path) -> ExperimentResult:
         summaries.append(summary)
         write_confusion(out_dir, spec["name"], summary["confusion"])
         write_predictions(out_dir, spec["name"], prediction_log)
+        predictions[spec["name"]] = [dict(zip(PREDICTION_HEADERS, row)) for row in prediction_log]
+
+        done, left = len(summaries), len(configurations) - len(summaries)
+        if left:                                  # live reports: readable after every finished configuration
+            minutes = (time.perf_counter() - started) / 60
+            status = (f"{done} of {len(configurations)} configurations done, {left} left "
+                      f"(~{minutes / done * left:.0f} min to go at {minutes / done:.1f} min per configuration).")
+            winner, notes = select_winner(summaries, rule)
+            write_reports(out_dir, name, summaries, winner, notes, rule, info(), small_class_max, status, predictions)
+            log.info("Configuration %s done: %s Live results: %s", spec["name"], status, out_dir / "comparison.md")
 
     winner, notes = select_winner(summaries, rule)
-    dataset_info = {
-        "ground_truth": config["ground_truth"], "images": len(truths), "documents": documents,
-        "negatives": len(truths) - documents, "fetch_failed": fetch_failed, "repeats": repeats,
-        "routing": routing.describe(), "source": source_name,
-    }
-    write_reports(out_dir, name, summaries, winner, notes, rule, dataset_info,
-                  int(config.get("small_class_max", SMALL_CLASS_MAX)))
+    write_reports(out_dir, name, summaries, winner, notes, rule, info(), small_class_max, predictions=predictions)
     log.info("Results written to %s (winner: %s)", out_dir, winner)
     return ExperimentResult(out_dir, winner, summaries)
